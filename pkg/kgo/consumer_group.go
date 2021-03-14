@@ -2,7 +2,6 @@ package kgo
 
 import (
 	"context"
-	"errors"
 	"regexp"
 	"sort"
 	"sync"
@@ -11,8 +10,6 @@ import (
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kmsg"
 )
-
-var errLeftGroup = errors.New("left group or client closed")
 
 // GroupOpt is an option to configure group consuming.
 type GroupOpt interface {
@@ -297,7 +294,11 @@ type groupConsumer struct {
 // manually issue a kmsg.LeaveGroupRequest or use an external tool (kafka
 // scripts or kcl).
 func (cl *Client) LeaveGroup() {
-	cl.AssignPartitions()
+	c := &cl.consumer
+	c.mu.Lock()
+	_, wait := c.unset()
+	c.mu.Unlock()
+	wait()
 }
 
 // AssignGroup assigns a group to consume from, overriding any prior
@@ -314,7 +315,9 @@ func (cl *Client) AssignGroup(group string, opts ...GroupOpt) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.unset()
+	if wasDead := c.unsetAndWait(); wasDead {
+		return
+	}
 
 	ctx, cancel := context.WithCancel(cl.ctx)
 	g := &groupConsumer{
@@ -356,8 +359,8 @@ func (cl *Client) AssignGroup(group string, opts ...GroupOpt) {
 	for _, balancer := range g.balancers {
 		g.cooperative = g.cooperative && balancer.isCooperative()
 	}
-	c.typ = consumerTypeGroup
-	c.group = g
+
+	c.storeGroup(g)
 
 	// Ensure all topics exist so that we will fetch their metadata.
 	if !g.regexTopics {
@@ -418,17 +421,19 @@ func (g *groupConsumer) manage() {
 		g.uncommitted = nil
 		g.mu.Unlock()
 
+		if err == context.Canceled { // context was canceled, quit now
+			return
+		}
+
 		// Waiting for the backoff is a good time to update our
 		// metadata; maybe the error is from stale metadata.
 		consecutiveErrors++
 		backoff := g.cl.cfg.retryBackoff(consecutiveErrors)
-		if err != errLeftGroup && err != context.Canceled { // if we left the group we return below
-			g.cl.cfg.logger.Log(LogLevelError, "join and sync loop errored",
-				"err", err,
-				"consecutive_errors", consecutiveErrors,
-				"backoff", backoff,
-			)
-		}
+		g.cl.cfg.logger.Log(LogLevelError, "join and sync loop errored",
+			"err", err,
+			"consecutive_errors", consecutiveErrors,
+			"backoff", backoff,
+		)
 		deadline := time.Now().Add(backoff)
 		g.cl.waitmeta(g.ctx, backoff)
 		after := time.NewTimer(time.Until(deadline))
@@ -441,7 +446,7 @@ func (g *groupConsumer) manage() {
 	}
 }
 
-func (g *groupConsumer) leave() {
+func (g *groupConsumer) leave() (wait func()) {
 	g.cancel()
 
 	// If g.using is nonzero before this check, then a manage goroutine has
@@ -450,37 +455,35 @@ func (g *groupConsumer) leave() {
 	g.dying = true
 	wasManaging := len(g.using) > 0
 	g.mu.Unlock()
-	if wasManaging {
-		// Leaving a group waits for the managing goroutine to be done,
-		// which can block in a users onAssign/onRevoke/onLost.  This
-		// can block a metadata update from completing, so we unlock
-		// the consumer mu to ensure that does not happen.
-		//
-		// TODO: fix this, since unlocking the consumer mu means
-		// another asignment can happen. This is a low risk vector,
-		// since it is unlikely that multiple assignments will be
-		// happening for a client, instead we expect one assignment to
-		// consume and one to leave.
-		g.c.mu.Unlock()
-		<-g.manageDone
-		g.c.mu.Lock()
-	}
 
-	if g.instanceID == nil {
-		g.cl.cfg.logger.Log(LogLevelInfo,
-			"leaving group",
-			"group", g.id,
-			"memberID", g.memberID, // lock not needed now since nothing can change it (manageDone)
-		)
-		(&kmsg.LeaveGroupRequest{
-			Group:    g.id,
-			MemberID: g.memberID,
-			Members: []kmsg.LeaveGroupRequestMember{{
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+
+		if wasManaging {
+			// We want to wait for the manage goroutine to be done
+			// so that we call the user's on{Assign,RevokeLost}.
+			<-g.manageDone
+		}
+
+		if g.instanceID == nil {
+			g.cl.cfg.logger.Log(LogLevelInfo,
+				"leaving group",
+				"group", g.id,
+				"memberID", g.memberID, // lock not needed now since nothing can change it (manageDone)
+			)
+			(&kmsg.LeaveGroupRequest{
+				Group:    g.id,
 				MemberID: g.memberID,
-				// no instance ID
-			}},
-		}).RequestWith(g.cl.ctx, g.cl)
-	}
+				Members: []kmsg.LeaveGroupRequestMember{{
+					MemberID: g.memberID,
+					// no instance ID
+				}},
+			}).RequestWith(g.cl.ctx, g.cl)
+		}
+	}()
+
+	return func() { <-done }
 }
 
 func (g *groupConsumer) diffAssigned() (added, lost map[string][]int32) {
@@ -823,7 +826,7 @@ func (g *groupConsumer) heartbeat(fetchErrCh <-chan error, s *assignRevokeSessio
 			// manage goroutine will race with us setting
 			// nowAssigned.
 			ctxCh = nil
-			err = errLeftGroup
+			err = context.Canceled
 		}
 
 		if heartbeat {
@@ -1488,15 +1491,16 @@ func (cl *Client) SetOffsets(setOffsets map[string]map[int32]EpochOffset) {
 		return
 	}
 
+	// We assignPartitions before returning, so we grab the consumer lock
+	// first.
 	c := &cl.consumer
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.typ != consumerTypeGroup {
+	g, ok := c.loadGroup()
+	if !ok {
 		return
 	}
-
-	g := c.group
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -1574,12 +1578,11 @@ func (cl *Client) SetOffsets(setOffsets map[string]map[int32]EpochOffset) {
 // If using a cooperative balancer, commits while consuming during rebalancing
 // may fail with REBALANCE_IN_PROGRESS.
 func (cl *Client) UncommittedOffsets() map[string]map[int32]EpochOffset {
-	cl.consumer.mu.Lock()
-	defer cl.consumer.mu.Unlock()
-	if cl.consumer.typ != consumerTypeGroup {
+	g, ok := cl.consumer.loadGroup()
+	if !ok {
 		return nil
 	}
-	return cl.consumer.group.getUncommitted()
+	return g.getUncommitted()
 }
 
 // CommittedOffsets returns the latest committed offsets. Committed offsets are
@@ -1587,16 +1590,10 @@ func (cl *Client) UncommittedOffsets() map[string]map[int32]EpochOffset {
 //
 // If there are no committed offsets, this returns nil.
 func (cl *Client) CommittedOffsets() map[string]map[int32]EpochOffset {
-	c := &cl.consumer
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.typ != consumerTypeGroup {
+	g, ok := cl.consumer.loadGroup()
+	if !ok {
 		return nil
 	}
-
-	g := c.group
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -1665,51 +1662,46 @@ func (cl *Client) BlockingCommitOffsets(
 	done := make(chan struct{})
 	defer func() { <-done }()
 
-	func() { // anonymous func called immediately for the defers
-		cl.cfg.logger.Log(LogLevelDebug, "in BlockingCommitOffsets", "with", uncommitted)
-		defer cl.cfg.logger.Log(LogLevelDebug, "left BlockingCommitOffsets")
+	cl.cfg.logger.Log(LogLevelDebug, "in BlockingCommitOffsets", "with", uncommitted)
+	defer cl.cfg.logger.Log(LogLevelDebug, "left BlockingCommitOffsets")
 
-		if onDone == nil {
-			onDone = func(_ *kmsg.OffsetCommitRequest, _ *kmsg.OffsetCommitResponse, _ error) {}
-		}
+	if onDone == nil {
+		onDone = func(_ *kmsg.OffsetCommitRequest, _ *kmsg.OffsetCommitResponse, _ error) {}
+	}
 
-		cl.consumer.mu.Lock()
-		defer cl.consumer.mu.Unlock()
+	g, ok := cl.consumer.loadGroup()
+	if !ok {
+		onDone(new(kmsg.OffsetCommitRequest), new(kmsg.OffsetCommitResponse), ErrNotGroup)
+		close(done)
+		return
+	}
+	if len(uncommitted) == 0 {
+		onDone(new(kmsg.OffsetCommitRequest), new(kmsg.OffsetCommitResponse), nil)
+		close(done)
+		return
+	}
 
-		if cl.consumer.typ != consumerTypeGroup {
-			onDone(new(kmsg.OffsetCommitRequest), new(kmsg.OffsetCommitResponse), ErrNotGroup)
-			close(done)
-			return
-		}
-		if len(uncommitted) == 0 {
-			onDone(new(kmsg.OffsetCommitRequest), new(kmsg.OffsetCommitResponse), nil)
-			close(done)
-			return
-		}
+	g.blockingCommitMu.Lock() // block all other concurrent commits until our OnDone is done.
 
-		g := cl.consumer.group
-		g.blockingCommitMu.Lock() // block all other concurrent commits until our OnDone is done.
+	unblockCommits := func(req *kmsg.OffsetCommitRequest, resp *kmsg.OffsetCommitResponse, err error) {
+		defer close(done)
+		defer g.blockingCommitMu.Unlock()
+		onDone(req, resp, err)
+	}
 
-		unblockCommits := func(req *kmsg.OffsetCommitRequest, resp *kmsg.OffsetCommitResponse, err error) {
-			defer close(done)
-			defer g.blockingCommitMu.Unlock()
-			onDone(req, resp, err)
-		}
+	g.mu.Lock()
+	go func() {
+		defer g.mu.Unlock()
 
-		g.mu.Lock()
-		go func() {
+		g.blockAuto = true
+		unblockAuto := func(req *kmsg.OffsetCommitRequest, resp *kmsg.OffsetCommitResponse, err error) {
+			unblockCommits(req, resp, err)
+			g.mu.Lock()
 			defer g.mu.Unlock()
+			g.blockAuto = false
+		}
 
-			g.blockAuto = true
-			unblockAuto := func(req *kmsg.OffsetCommitRequest, resp *kmsg.OffsetCommitResponse, err error) {
-				unblockCommits(req, resp, err)
-				g.mu.Lock()
-				defer g.mu.Unlock()
-				g.blockAuto = false
-			}
-
-			g.commit(ctx, uncommitted, unblockAuto)
-		}()
+		g.commit(ctx, uncommitted, unblockAuto)
 	}()
 }
 
@@ -1756,9 +1748,9 @@ func (cl *Client) CommitOffsets(
 	if onDone == nil {
 		onDone = func(_ *kmsg.OffsetCommitRequest, _ *kmsg.OffsetCommitResponse, _ error) {}
 	}
-	cl.consumer.mu.Lock()
-	defer cl.consumer.mu.Unlock()
-	if cl.consumer.typ != consumerTypeGroup {
+
+	g, ok := cl.consumer.loadGroup()
+	if !ok {
 		onDone(new(kmsg.OffsetCommitRequest), new(kmsg.OffsetCommitResponse), ErrNotGroup)
 		return
 	}
@@ -1767,7 +1759,6 @@ func (cl *Client) CommitOffsets(
 		return
 	}
 
-	g := cl.consumer.group
 	g.blockingCommitMu.RLock() // block BlockingCommit, but allow other concurrent Commit to cancel us
 
 	unblockSyncCommit := func(req *kmsg.OffsetCommitRequest, resp *kmsg.OffsetCommitResponse, err error) {

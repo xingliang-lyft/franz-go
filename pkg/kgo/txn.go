@@ -63,15 +63,10 @@ func (cl *Client) AssignGroupTransactSession(group string, opts ...GroupOpt) *Gr
 		cl: cl,
 	}
 
-	c := &cl.consumer
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.typ != consumerTypeGroup {
-		return nil // invalid, but we will let the caller handle this
+	g, ok := cl.consumer.loadGroup()
+	if !ok {
+		return nil // concurrent Assign; users should not do this
 	}
-
-	g := c.group
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -333,10 +328,8 @@ func (cl *Client) EndTransaction(ctx context.Context, commit TransactionEndTry) 
 	atomic.StoreUint32(&cl.producer.producingTxn, 0) // forbid any new produces while ending txn
 
 	defer func() {
-		cl.consumer.mu.Lock()
-		defer cl.consumer.mu.Unlock()
-		if cl.consumer.typ == consumerTypeGroup {
-			cl.consumer.group.offsetsAddedToTxn = false
+		if g, ok := cl.consumer.loadGroup(); ok {
+			g.offsetsAddedToTxn = false
 		}
 	}()
 
@@ -462,11 +455,10 @@ func (cl *Client) commitTransactionOffsets(
 		cl.producer.txnMu.Unlock()
 		return
 	}
-	cl.consumer.mu.Lock()
 	cl.producer.txnMu.Unlock()
 
-	defer cl.consumer.mu.Unlock()
-	if cl.consumer.typ != consumerTypeGroup {
+	g, ok := cl.consumer.loadGroup()
+	if !ok {
 		onDone(new(kmsg.TxnOffsetCommitRequest), new(kmsg.TxnOffsetCommitResponse), ErrNotGroup)
 		return
 	}
@@ -475,7 +467,6 @@ func (cl *Client) commitTransactionOffsets(
 		return
 	}
 
-	g := cl.consumer.group
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -521,7 +512,8 @@ func (cl *Client) addOffsetsToTxn(ctx context.Context, group string) error {
 }
 
 // commitTxn is ALMOST EXACTLY THE SAME as commit, but changed for txn types
-// and we avoid updateCommitted.
+// and we avoid updateCommitted. We avoid updating because we manually
+// SetOffsets when ending the transaction.
 func (g *groupConsumer) commitTxn(
 	ctx context.Context,
 	uncommitted map[string]map[int32]EpochOffset,
