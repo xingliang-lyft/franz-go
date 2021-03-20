@@ -327,11 +327,24 @@ func (cl *Client) EndTransaction(ctx context.Context, commit TransactionEndTry) 
 
 	atomic.StoreUint32(&cl.producer.producingTxn, 0) // forbid any new produces while ending txn
 
-	defer func() {
-		if g, ok := cl.consumer.loadGroup(); ok {
+	// anyAdded tracks if any partitions were added to this txn, because
+	// any partitions written to triggers AddPartitionToTxn, which triggers
+	// the txn to actually begin within Kafka.
+	//
+	// If we consumed at all but did not produce, the transaction ending
+	// issues AddOffsetsToTxn, which internally adds a __consumer_offsets
+	// partition to the transaction. Thus, if we added offsets, then we
+	// also produced.
+	var anyAdded bool
+	g, ok := cl.consumer.loadGroup()
+	if ok {
+		if g.offsetsAddedToTxn {
 			g.offsetsAddedToTxn = false
+			anyAdded = true
 		}
-	}()
+	} else {
+		cl.cfg.logger.Log(LogLevelDebug, "transaction ending, no group loaded; this must be a producer-only transaction, not consume-modify-produce EOS")
+	}
 
 	if !cl.producer.inTxn {
 		return ErrNotInTransaction
@@ -340,7 +353,6 @@ func (cl *Client) EndTransaction(ctx context.Context, commit TransactionEndTry) 
 
 	// After the flush, no records are being produced to, and we can set
 	// addedToTxn to false outside of any mutex.
-	var anyAdded bool
 	for _, parts := range cl.loadTopics() {
 		for _, part := range parts.load().partitions {
 			if part.records.addedToTxn {
