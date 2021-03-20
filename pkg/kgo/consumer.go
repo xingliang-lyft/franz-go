@@ -80,7 +80,14 @@ func (o Offset) At(at int64) Offset {
 type consumer struct {
 	cl *Client
 
-	mu sync.Mutex   // used when setting v, which is atomic for non-locking reads
+	// mu is grabbed when
+	//  - setting v (AssignGroup, AssignDirect, or Close)
+	//  - polling fetches, for quickly draining sources / updating group uncommitted
+	//  - calling assignPartitions (group / direct updates)
+	//
+	// v is atomic for non-locking reads in a few instances where that
+	// is preferrable / allowed.
+	mu sync.Mutex
 	v  atomic.Value // *consumerValue
 
 	// On metadata update, if the consumer is set (direct or group), the
@@ -233,12 +240,34 @@ func (cl *Client) PollFetches(ctx context.Context) Fetches {
 
 	var fetches Fetches
 	fill := func() {
+		// A group can grab the consumer lock then the group mu and
+		// assign partitions. The group mu is grabbed to update its
+		// uncommitted map. Assigning partitions clears sources ready
+		// for draining.
+		//
+		// We need to grab the consumer mu to ensure proper lock
+		// ordering and prevent lock inversion. Polling fetches also
+		// updates the group's uncommitted map; if we do not grab the
+		// consumer mu at the top, we have a problem: without the lock,
+		// we could have grabbed some sources, then a group assigned,
+		// and after the assign, we update uncommitted with fetches
+		// from the old assignment
+		c.mu.Lock()
+		defer c.mu.Unlock()
+
 		c.sourcesReadyMu.Lock()
-		defer c.sourcesReadyMu.Unlock()
 		for _, ready := range c.sourcesReadyForDraining {
 			fetches = append(fetches, ready.takeBuffered())
 		}
 		c.sourcesReadyForDraining = nil
+		realFetches := fetches
+		fetches = append(fetches, c.fakeReadyForDraining...)
+		c.fakeReadyForDraining = nil
+		c.sourcesReadyMu.Unlock()
+
+		if len(realFetches) == 0 {
+			return
+		}
 
 		// Before returning, we want to update our uncommitted. If we
 		// updated after, then we could end up with weird interactions
@@ -249,12 +278,9 @@ func (cl *Client) PollFetches(ctx context.Context) Fetches {
 		// session to start. If we returned stale fetches that did not
 		// have their uncommitted offset tracked, then we would allow
 		// duplicates.
-		if g, ok := c.loadGroup(); ok && len(fetches) > 0 {
+		if g, ok := c.loadGroup(); ok {
 			g.updateUncommitted(fetches)
 		}
-
-		fetches = append(fetches, c.fakeReadyForDraining...)
-		c.fakeReadyForDraining = nil
 	}
 
 	fill()
@@ -411,7 +437,12 @@ func (c *consumer) assignPartitions(assignments map[string]map[int32]Offset, how
 	clientTopics := c.cl.loadTopics()
 	for topic, partitions := range assignments {
 
-		topicParts := clientTopics[topic].load() // must be non-nil, which is ensured in Assign<> or in metadata when consuming as regex
+		topicPartitions := clientTopics[topic] // should be non-nil
+		if topicPartitions == nil {
+			c.cl.cfg.logger.Log(LogLevelError, "BUG! consumer was assigned topic that we did not ask for in AssignGroup nor AssignDirect, skipping!", "topic", topic)
+			continue
+		}
+		topicParts := topicPartitions.load()
 
 		for partition, offset := range partitions {
 			// First, if the request is exact, get rid of the relative
@@ -478,13 +509,12 @@ func (c *consumer) doOnMetadataUpdate() {
 	// block below.
 	if c.outstandingMetadataUpdates.maybeBegin() {
 		doUpdate := func() {
-			c.mu.Lock()
-			defer c.mu.Unlock()
-
 			switch t := c.loadKind().(type) {
 			case *directConsumer:
 				if new := t.findNewAssignments(c.cl.loadTopics()); len(new) > 0 {
+					c.mu.Lock()
 					c.assignPartitions(new, assignWithoutInvalidating)
+					c.mu.Unlock()
 				}
 			case *groupConsumer:
 				t.findNewAssignments(c.cl.loadTopics())

@@ -557,14 +557,13 @@ func (g *groupConsumer) commitTxn(
 	// The id must have been set at least once by this point because of
 	// addOffsetsToTxn.
 	id, epoch, _ := g.cl.producerID()
-	memberID := g.memberID
 	req := &kmsg.TxnOffsetCommitRequest{
 		TransactionalID: *g.cl.cfg.txnID,
 		Group:           g.id,
 		ProducerID:      id,
 		ProducerEpoch:   epoch,
 		Generation:      g.generation,
-		MemberID:        memberID,
+		MemberID:        g.memberID,
 		InstanceID:      g.instanceID,
 	}
 
@@ -602,7 +601,7 @@ func (g *groupConsumer) commitTxn(
 					Partition:   partition,
 					Offset:      eo.Offset,
 					LeaderEpoch: eo.Epoch,
-					Metadata:    &memberID,
+					Metadata:    &req.MemberID,
 				})
 			}
 		}
