@@ -62,8 +62,9 @@ type directConsumer struct {
 // This takes ownership of any assignments.
 func (cl *Client) AssignPartitions(opts ...DirectConsumeOpt) {
 	c := &cl.consumer
-	c.mu.Lock()
-	defer c.mu.Unlock()
+
+	c.assignMu.Lock()
+	defer c.assignMu.Unlock()
 
 	if wasDead := c.unsetAndWait(); wasDead {
 		return

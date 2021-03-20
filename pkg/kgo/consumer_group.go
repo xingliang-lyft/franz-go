@@ -332,7 +332,11 @@ type groupConsumer struct {
 // manually issue a kmsg.LeaveGroupRequest or use an external tool (kafka
 // scripts or kcl).
 func (cl *Client) LeaveGroup() {
-	cl.consumer.unsetAndWait()
+	c := &cl.consumer
+	c.assignMu.Lock()
+	_, wait := cl.consumer.unset()
+	c.assignMu.Unlock()
+	wait()
 }
 
 // AssignGroup assigns a group to consume from, overriding any prior
@@ -346,8 +350,9 @@ func (cl *Client) LeaveGroup() {
 // It is recommended to do one final blocking commit before leaving a group.
 func (cl *Client) AssignGroup(group string, opts ...GroupOpt) {
 	c := &cl.consumer
-	c.mu.Lock()
-	defer c.mu.Unlock()
+
+	c.assignMu.Lock()
+	defer c.assignMu.Unlock()
 
 	if wasDead := c.unsetAndWait(); wasDead {
 		return
@@ -1081,7 +1086,7 @@ start:
 			g.cl.cfg.logger.Log(LogLevelInfo, "sync failed with RebalanceInProgress, rejoining")
 			goto start
 		}
-		g.cl.cfg.logger.Log(LogLevelWarn, "sync group failed", err)
+		g.cl.cfg.logger.Log(LogLevelWarn, "sync group failed", "err", err)
 		return err
 	}
 

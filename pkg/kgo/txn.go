@@ -139,15 +139,8 @@ func (s *GroupTransactSession) End(ctx context.Context, commit TransactionEndTry
 		s.revoked = false
 		s.revokeMu.Unlock()
 	}()
-	switch commit {
-	case TryCommit:
-		if err := s.cl.Flush(ctx); err != nil {
-			return false, err // we do not abort below, because an error here is ctx closing
-		}
-	case TryAbort:
-		if err := s.cl.AbortBufferedRecords(ctx); err != nil {
-			return false, err // same
-		}
+	if err := s.cl.Flush(ctx); err != nil {
+		return false, err // we do not abort below, because an error here is ctx closing
 	}
 
 	wantCommit := bool(commit)

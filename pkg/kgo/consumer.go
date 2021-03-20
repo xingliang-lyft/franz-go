@@ -80,15 +80,16 @@ func (o Offset) At(at int64) Offset {
 type consumer struct {
 	cl *Client
 
+	// assignMu is grabbed when setting v (AssignGroup, AssignDirect, or Close)
 	// mu is grabbed when
-	//  - setting v (AssignGroup, AssignDirect, or Close)
 	//  - polling fetches, for quickly draining sources / updating group uncommitted
 	//  - calling assignPartitions (group / direct updates)
 	//
 	// v is atomic for non-locking reads in a few instances where that
 	// is preferrable / allowed.
-	mu sync.Mutex
-	v  atomic.Value // *consumerValue
+	assignMu sync.Mutex
+	mu       sync.Mutex
+	v        atomic.Value // *consumerValue
 
 	// On metadata update, if the consumer is set (direct or group), the
 	// client begins a goroutine that updates the consumer kind's
@@ -169,25 +170,29 @@ func (c *consumer) storeDirect(d *directConsumer) { c.v.Store(&consumerValue{v: 
 func (c *consumer) storeGroup(g *groupConsumer)   { c.v.Store(&consumerValue{v: g}) } // while locked
 
 func (c *consumer) kill() (wasDead bool) {
-	c.mu.Lock()
+	c.assignMu.Lock()
 	wasDead, wait := c.unset()
 	c.v.Store(consumerDeadSentinel)
-	c.mu.Unlock()
+	c.assignMu.Unlock()
+
 	wait()
 	return wasDead
 }
 
-func (c *consumer) unsetAndWait() (wasDead bool) { // under consumer mu
+func (c *consumer) unsetAndWait() (wasDead bool) {
 	wasDead, wait := c.unset()
 	wait()
 	return wasDead
 }
 
-// unset, called under the consumer mu, transitions the group to the unset
+// unset, called under the assign mu, transitions the group to the unset
 // state, invalidating old assignments and leaving a group if it was in one.
 //
 // This returns a function to wait for a group to be left, if in one.
 func (c *consumer) unset() (wasDead bool, wait func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	c.assignPartitions(nil, assignInvalidateAll)
 
 	prior := c.loadKind()
