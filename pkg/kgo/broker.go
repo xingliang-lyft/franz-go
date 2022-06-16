@@ -784,10 +784,11 @@ start:
 
 func (cxn *brokerCxn) doSasl(authenticate bool) error {
 	session, clientWrite, err := cxn.mechanism.Authenticate(cxn.cl.ctx, cxn.addr)
-	cxn.cl.cfg.logger.Log(LogLevelDebug, "doSasl ", "session", session, "challenge", string(clientWrite))
 	if err != nil {
+		cxn.cl.cfg.logger.Log(LogLevelDebug, "doSasl has early errors", "err", err)
 		return err
 	}
+	cxn.cl.cfg.logger.Log(LogLevelDebug, "doSasl ", "session", session, "challenge", string(clientWrite))
 	if len(clientWrite) == 0 {
 		return fmt.Errorf("unexpected server-write sasl with mechanism %s", cxn.mechanism.Name())
 	}
