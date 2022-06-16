@@ -784,6 +784,7 @@ start:
 
 func (cxn *brokerCxn) doSasl(authenticate bool) error {
 	session, clientWrite, err := cxn.mechanism.Authenticate(cxn.cl.ctx, cxn.addr)
+	cxn.cl.cfg.logger.Log(LogLevelDebug, "doSasl ", "session", session, "challenge", string(clientWrite))
 	if err != nil {
 		return err
 	}
@@ -864,7 +865,7 @@ func (cxn *brokerCxn) doSasl(authenticate bool) error {
 				}
 				challenge = resp.SASLAuthBytes
 				lifetimeMillis = resp.SessionLifetimeMillis
-				cxn.cl.cfg.logger.Log(LogLevelDebug, "sasl has a lifetime", lifetimeMillis)
+				cxn.cl.cfg.logger.Log(LogLevelDebug, "doSasl has values ", "lifetimeMillis", lifetimeMillis)
 			}
 		}
 
@@ -872,6 +873,7 @@ func (cxn *brokerCxn) doSasl(authenticate bool) error {
 
 		if !done {
 			if done, clientWrite, err = session.Challenge(challenge); err != nil {
+				cxn.cl.cfg.logger.Log(LogLevelDebug, "sasl has errors ", "error", err.Error())
 				return err
 			}
 		}
@@ -898,7 +900,7 @@ func (cxn *brokerCxn) doSasl(authenticate bool) error {
 		useLifetime := lifetimeMillis - latency
 		now := time.Now()
 		cxn.expiry = now.Add(time.Duration(useLifetime) * time.Millisecond)
-		cxn.cl.cfg.logger.Log(LogLevelDebug, "sasl has a limited lifetime", "broker", logID(cxn.b.meta.NodeID), "reauthenticate_in", cxn.expiry.Sub(now))
+		cxn.cl.cfg.logger.Log(LogLevelDebug, "sasl has a limited lifetime", "broker", logID(cxn.b.meta.NodeID), "reauthenticate_in", cxn.expiry.Sub(now), "expiry", cxn.expiry)
 		if useLifetime < 0 {
 			cxn.cl.cfg.logger.Log(LogLevelInfo, "sasl lifetime minus 2.5s lower bound latency results in immediate reauthentication, sleeping 100ms to avoid spin-loop",
 				"broker", logID(cxn.b.meta.NodeID),
