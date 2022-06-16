@@ -864,6 +864,7 @@ func (cxn *brokerCxn) doSasl(authenticate bool) error {
 				}
 				challenge = resp.SASLAuthBytes
 				lifetimeMillis = resp.SessionLifetimeMillis
+				cxn.cl.cfg.logger.Log(LogLevelDebug, "sasl has a lifetime", lifetimeMillis)
 			}
 		}
 
@@ -875,8 +876,7 @@ func (cxn *brokerCxn) doSasl(authenticate bool) error {
 			}
 		}
 	}
-
-	if lifetimeMillis > 0 {
+	if lifetimeMillis >= 0 {
 		// Lifetime: we could have written our request instantaenously,
 		// the broker calculating our session lifetime, and then the
 		// broker / network hung for a bit when writing. We
