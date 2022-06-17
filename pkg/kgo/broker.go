@@ -864,12 +864,9 @@ func (cxn *brokerCxn) doSasl(authenticate bool) error {
 				}
 
 				if err = kerr.ErrorForCode(resp.ErrorCode); err != nil {
+					cxn.cl.cfg.logger.Log(LogLevelDebug, "doSasl TAF error", "corrID", corrID, "requestId", requestId)
 					if resp.ErrorMessage != nil {
 						return fmt.Errorf("%s: %w", *resp.ErrorMessage, err)
-					}
-					if err == kerr.TopicAuthorizationFailed {
-						cxn.cl.cfg.logger.Log(LogLevelDebug, "doSasl TAF error",
-							"corrID", corrID, "requestId", requestId)
 					}
 					return err
 				}
