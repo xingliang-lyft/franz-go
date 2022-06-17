@@ -3,6 +3,7 @@ module github.com/twmb/franz-go
 go 1.15
 
 require (
+	github.com/hashicorp/go-uuid v1.0.3
 	github.com/klauspost/compress v1.15.4
 	github.com/pierrec/lz4/v4 v4.1.14
 	github.com/twmb/franz-go/pkg/kmsg v1.1.0

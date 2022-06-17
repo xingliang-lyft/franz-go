@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hashicorp/go-uuid"
 	"github.com/twmb/franz-go/pkg/kbin"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kmsg"
@@ -788,11 +789,15 @@ func (cxn *brokerCxn) doSasl(authenticate bool) error {
 		cxn.cl.cfg.logger.Log(LogLevelDebug, "doSasl has early errors", "err", err)
 		return err
 	}
-	cxn.cl.cfg.logger.Log(LogLevelDebug, "doSasl ", "session", session, "challenge", string(clientWrite))
 	if len(clientWrite) == 0 {
 		return fmt.Errorf("unexpected server-write sasl with mechanism %s", cxn.mechanism.Name())
 	}
+	cxn.cl.cfg.logger.Log(LogLevelDebug, "doSasl ", "session", session, "challenge", string(clientWrite))
 
+	requestId, uuidErr := uuid.GenerateUUID()
+	if uuidErr != nil {
+		requestId = time.Now().String()
+	}
 	prereq := time.Now() // used below for sasl lifetime calculation
 	var lifetimeMillis int64
 
@@ -815,7 +820,7 @@ func (cxn *brokerCxn) doSasl(authenticate bool) error {
 			binary.BigEndian.PutUint32(buf, uint32(len(clientWrite)))
 			buf = append(buf, clientWrite...)
 
-			cxn.cl.cfg.logger.Log(LogLevelDebug, "issuing raw sasl authenticate", "broker", logID(cxn.b.meta.NodeID), "step", step)
+			cxn.cl.cfg.logger.Log(LogLevelDebug, "issuing raw sasl authenticate", "broker", logID(cxn.b.meta.NodeID), "step", step, "requestId", requestId)
 			_, _, _, _, err = cxn.writeConn(context.Background(), buf, wt, time.Now())
 
 			cxn.cl.bufPool.put(buf)
@@ -832,7 +837,7 @@ func (cxn *brokerCxn) doSasl(authenticate bool) error {
 			req := kmsg.NewPtrSASLAuthenticateRequest()
 			req.SASLAuthBytes = clientWrite
 			req.Version = cxn.b.loadVersions().versions[req.Key()]
-			cxn.cl.cfg.logger.Log(LogLevelDebug, "issuing SASLAuthenticate", "broker", logID(cxn.b.meta.NodeID), "version", req.Version, "step", step)
+			cxn.cl.cfg.logger.Log(LogLevelDebug, "issuing SASLAuthenticate", "broker", logID(cxn.b.meta.NodeID), "version", req.Version, "step", step, "requestId", requestId)
 
 			// Lifetime: we take the timestamp before we write our
 			// request; see usage below for why.
@@ -862,11 +867,18 @@ func (cxn *brokerCxn) doSasl(authenticate bool) error {
 					if resp.ErrorMessage != nil {
 						return fmt.Errorf("%s: %w", *resp.ErrorMessage, err)
 					}
+					if err == kerr.TopicAuthorizationFailed {
+						cxn.cl.cfg.logger.Log(LogLevelDebug, "doSasl TAF error",
+							"corrID", corrID, "requestId", requestId)
+					}
 					return err
 				}
 				challenge = resp.SASLAuthBytes
 				lifetimeMillis = resp.SessionLifetimeMillis
-				cxn.cl.cfg.logger.Log(LogLevelDebug, "doSasl has values ", "lifetimeMillis", lifetimeMillis)
+				if lifetimeMillis == 0 {
+					cxn.cl.cfg.logger.Log(LogLevelDebug, "doSasl has values ",
+						"lifetimeMillis", lifetimeMillis, "corrID", corrID, "requestId", requestId)
+				}
 			}
 		}
 
@@ -874,7 +886,7 @@ func (cxn *brokerCxn) doSasl(authenticate bool) error {
 
 		if !done {
 			if done, clientWrite, err = session.Challenge(challenge); err != nil {
-				cxn.cl.cfg.logger.Log(LogLevelDebug, "sasl has errors ", "error", err.Error())
+				cxn.cl.cfg.logger.Log(LogLevelDebug, "sasl has errors ", "error", err, "requestId", requestId)
 				return err
 			}
 		}
@@ -901,12 +913,17 @@ func (cxn *brokerCxn) doSasl(authenticate bool) error {
 		useLifetime := lifetimeMillis - latency
 		now := time.Now()
 		cxn.expiry = now.Add(time.Duration(useLifetime) * time.Millisecond)
-		cxn.cl.cfg.logger.Log(LogLevelDebug, "sasl has a limited lifetime", "broker", logID(cxn.b.meta.NodeID), "reauthenticate_in", cxn.expiry.Sub(now), "expiry", cxn.expiry)
+		cxn.cl.cfg.logger.Log(LogLevelDebug, "sasl has a limited lifetime",
+			"broker", logID(cxn.b.meta.NodeID),
+			"reauthenticate_in", cxn.expiry.Sub(now),
+			"expiry", cxn.expiry,
+			"requestId", requestId)
 		if useLifetime < 0 {
 			cxn.cl.cfg.logger.Log(LogLevelInfo, "sasl lifetime minus 2.5s lower bound latency results in immediate reauthentication, sleeping 100ms to avoid spin-loop",
 				"broker", logID(cxn.b.meta.NodeID),
 				"session_lifetime", time.Duration(lifetimeMillis)*time.Millisecond,
 				"latency_lower_bound", time.Duration(latency)*time.Millisecond,
+				"requestId", requestId,
 			)
 			time.Sleep(100 * time.Millisecond)
 		}
