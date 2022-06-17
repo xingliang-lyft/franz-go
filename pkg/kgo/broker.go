@@ -785,19 +785,19 @@ start:
 
 func (cxn *brokerCxn) doSasl(authenticate bool) error {
 	session, clientWrite, err := cxn.mechanism.Authenticate(cxn.cl.ctx, cxn.addr)
+	requestId, uuidErr := uuid.GenerateUUID()
+	if uuidErr != nil {
+		requestId = time.Now().String()
+	}
 	if err != nil {
-		cxn.cl.cfg.logger.Log(LogLevelDebug, "doSasl has early errors", "err", err)
+		cxn.cl.cfg.logger.Log(LogLevelDebug, "doSasl has early errors", "err", err, "requestId", requestId)
 		return err
 	}
 	if len(clientWrite) == 0 {
 		return fmt.Errorf("unexpected server-write sasl with mechanism %s", cxn.mechanism.Name())
 	}
-	cxn.cl.cfg.logger.Log(LogLevelDebug, "doSasl ", "session", session, "challenge", string(clientWrite))
+	cxn.cl.cfg.logger.Log(LogLevelDebug, "doSasl ", "session", session, "challenge", string(clientWrite), "requestId", requestId)
 
-	requestId, uuidErr := uuid.GenerateUUID()
-	if uuidErr != nil {
-		requestId = time.Now().String()
-	}
 	prereq := time.Now() // used below for sasl lifetime calculation
 	var lifetimeMillis int64
 
