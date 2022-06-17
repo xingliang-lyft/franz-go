@@ -264,15 +264,20 @@ start:
 
 func (b *broker) handleReq(pr promisedReq) {
 	req := pr.req
+	requestId, uuidErr := uuid.GenerateUUID()
+	if uuidErr != nil {
+		requestId = time.Now().String()
+	}
 	var cxn *brokerCxn
 	{
 		var err error
-		if cxn, err = b.loadConnection(pr.ctx, req); err != nil {
+		if cxn, err = b.loadConnection(pr.ctx, req, requestId); err != nil {
+			cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-loadConnections-Error", "err", err, "requestId", requestId)
 			pr.promise(nil, err)
 			return
 		}
 	}
-
+	cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-loadConnections-success", "requestId", requestId)
 	v := b.loadVersions()
 
 	if int(req.Key()) > v.len() || b.cl.cfg.maxVersions != nil && !b.cl.cfg.maxVersions.HasKey(req.Key()) {
@@ -324,7 +329,7 @@ func (b *broker) handleReq(pr promisedReq) {
 		// reply with a <1s lifetime, but if we end up here, then we
 		// kill the connection ourselves and retry on a new connection.
 		if reauthentications > 15 {
-			cxn.cl.cfg.logger.Log(LogLevelError, "the broker has repeatedly given us short sasl lifetimes, we are forcefully killing our own connection to retry on a new connection ", "broker", logID(cxn.b.meta.NodeID))
+			cxn.cl.cfg.logger.Log(LogLevelError, "the broker has repeatedly given us short sasl lifetimes, we are forcefully killing our own connection to retry on a new connection ", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId)
 			pr.promise(nil, errSaslReauthLoop)
 			cxn.die()
 			return
@@ -334,8 +339,8 @@ func (b *broker) handleReq(pr promisedReq) {
 		// can only have an expiry if we went the authenticate
 		// flow, so we know we are authenticating again.
 		// For KIP-368.
-		cxn.cl.cfg.logger.Log(LogLevelDebug, "sasl expiry limit reached, reauthenticating", "broker", logID(cxn.b.meta.NodeID))
-		if err := cxn.sasl(); err != nil {
+		cxn.cl.cfg.logger.Log(LogLevelDebug, "sasl expiry limit reached, reauthenticating", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId)
+		if err := cxn.sasl(requestId); err != nil {
 			pr.promise(nil, err)
 			cxn.die()
 			return
@@ -350,6 +355,7 @@ func (b *broker) handleReq(pr promisedReq) {
 	// loop. We could be more precise with error tracking, though.
 	select {
 	case <-pr.ctx.Done():
+		cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-context-canceled-Error", "err", pr.ctx.Err(), "requestId", requestId)
 		pr.promise(nil, pr.ctx.Err())
 		return
 	default:
@@ -385,9 +391,10 @@ func (b *broker) handleReq(pr promisedReq) {
 		noResp.Version = req.GetVersion()
 	}
 
-	corrID, bytesWritten, writeWait, timeToWrite, readEnqueue, writeErr := cxn.writeRequest(pr.ctx, pr.enqueue, req)
+	corrID, bytesWritten, writeWait, timeToWrite, readEnqueue, writeErr := cxn.writeRequest(pr.ctx, pr.enqueue, req, requestId)
 
 	if writeErr != nil {
+		cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-writeRequest-Error", "err", pr.ctx.Err(), "requestId", requestId)
 		pr.promise(nil, writeErr)
 		cxn.die()
 		cxn.hookWriteE2E(req.Key(), bytesWritten, writeWait, timeToWrite, writeErr)
@@ -443,7 +450,7 @@ func (p bufPool) put(b []byte) { p.p.Put(&b) }
 
 // loadConection returns the broker's connection, creating it if necessary
 // and returning an error of if that fails.
-func (b *broker) loadConnection(ctx context.Context, req kmsg.Request) (*brokerCxn, error) {
+func (b *broker) loadConnection(ctx context.Context, req kmsg.Request, requestId string) (*brokerCxn, error) {
 	var (
 		pcxn         = &b.cxnNormal
 		isProduceCxn bool // see docs on brokerCxn.discard for why we do this
@@ -479,12 +486,12 @@ func (b *broker) loadConnection(ctx context.Context, req kmsg.Request) (*brokerC
 		conn:   conn,
 		deadCh: make(chan struct{}),
 	}
-	if err = cxn.init(isProduceCxn); err != nil {
-		b.cl.cfg.logger.Log(LogLevelDebug, "connection initialization failed", "addr", b.addr, "broker", logID(b.meta.NodeID), "err", err)
+	if err = cxn.init(isProduceCxn, requestId); err != nil {
+		b.cl.cfg.logger.Log(LogLevelDebug, "connection initialization failed", "addr", b.addr, "broker", logID(b.meta.NodeID), "err", err, requestId)
 		cxn.closeConn()
 		return nil, err
 	}
-	b.cl.cfg.logger.Log(LogLevelDebug, "connection initialized successfully", "addr", b.addr, "broker", logID(b.meta.NodeID))
+	b.cl.cfg.logger.Log(LogLevelDebug, "connection initialized successfully", "addr", b.addr, "broker", logID(b.meta.NodeID), "requestId", requestId)
 
 	b.reapMu.Lock()
 	defer b.reapMu.Unlock()
@@ -510,7 +517,8 @@ func (cl *Client) reapConnectionsLoop() {
 			reaped := cl.reapConnections(idleTimeout)
 			dur := time.Since(start)
 			if reaped > 0 {
-				cl.cfg.logger.Log(LogLevelDebug, "reaped connections", "time_since_last_reap", tick.Sub(last), "reap_dur", dur, "num_reaped", reaped)
+				cl.cfg.logger.Log(LogLevelDebug, "reaped connections",
+					"time_since_last_reap", tick.Sub(last), "reap_dur", dur, "num_reaped", reaped)
 			}
 			last = tick
 		}
@@ -525,7 +533,11 @@ func (cl *Client) reapConnections(idleTimeout time.Duration) (total int) {
 	cl.brokersMu.Unlock()
 
 	for _, broker := range brokers {
-		total += broker.reapConnections(idleTimeout)
+		count := broker.reapConnections(idleTimeout)
+		if count > 0 {
+			cl.cfg.logger.Log(LogLevelDebug, "reaped connections", "broker", broker.addr, "count", count)
+		}
+		total += count
 	}
 	return total
 }
@@ -622,13 +634,14 @@ type brokerCxn struct {
 	deadCh chan struct{}
 }
 
-func (cxn *brokerCxn) init(isProduceCxn bool) error {
+func (cxn *brokerCxn) init(isProduceCxn bool, requestId string) error {
+	cxn.cl.cfg.logger.Log(LogLevelDebug, "re-initializing connections", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId)
 	hasVersions := cxn.b.loadVersions() != nil
 	if !hasVersions {
 		if cxn.b.cl.cfg.maxVersions == nil || cxn.b.cl.cfg.maxVersions.HasKey(18) {
 			if err := cxn.requestAPIVersions(); err != nil {
 				if !errors.Is(err, ErrClientClosed) {
-					cxn.cl.cfg.logger.Log(LogLevelError, "unable to request api versions", "broker", logID(cxn.b.meta.NodeID), "err", err)
+					cxn.cl.cfg.logger.Log(LogLevelError, "unable to request api versions", "broker", logID(cxn.b.meta.NodeID), "err", err, "requestId", requestId)
 				}
 				return err
 			}
@@ -639,9 +652,9 @@ func (cxn *brokerCxn) init(isProduceCxn bool) error {
 		}
 	}
 
-	if err := cxn.sasl(); err != nil {
+	if err := cxn.sasl(""); err != nil {
 		if !errors.Is(err, ErrClientClosed) {
-			cxn.cl.cfg.logger.Log(LogLevelError, "unable to initialize sasl", "broker", logID(cxn.b.meta.NodeID), "err", err)
+			cxn.cl.cfg.logger.Log(LogLevelError, "unable to initialize sasl", "broker", logID(cxn.b.meta.NodeID), "err", err, "requestId", requestId)
 		}
 		return err
 	}
@@ -672,7 +685,7 @@ start:
 	req.ClientSoftwareName = cxn.cl.cfg.softwareName
 	req.ClientSoftwareVersion = cxn.cl.cfg.softwareVersion
 	cxn.cl.cfg.logger.Log(LogLevelDebug, "issuing api versions request", "broker", logID(cxn.b.meta.NodeID), "version", maxVersion)
-	corrID, bytesWritten, writeWait, timeToWrite, readEnqueue, writeErr := cxn.writeRequest(nil, time.Now(), req)
+	corrID, bytesWritten, writeWait, timeToWrite, readEnqueue, writeErr := cxn.writeRequest(nil, time.Now(), req, "requestAPIVersions")
 	if writeErr != nil {
 		cxn.hookWriteE2E(req.Key(), bytesWritten, writeWait, timeToWrite, writeErr)
 		return writeErr
@@ -729,14 +742,13 @@ start:
 	return nil
 }
 
-func (cxn *brokerCxn) sasl() error {
+func (cxn *brokerCxn) sasl(requestId string) error {
 	if len(cxn.cl.cfg.sasls) == 0 {
 		return nil
 	}
 	mechanism := cxn.cl.cfg.sasls[0]
 	retried := false
 	authenticate := false
-
 	v := cxn.b.loadVersions()
 	req := kmsg.NewPtrSASLHandshakeRequest()
 
@@ -744,10 +756,11 @@ start:
 	if mechanism.Name() != "GSSAPI" && v.versions[req.Key()] >= 0 {
 		req.Mechanism = mechanism.Name()
 		req.Version = v.versions[req.Key()]
-		cxn.cl.cfg.logger.Log(LogLevelDebug, "issuing SASLHandshakeRequest", "broker", logID(cxn.b.meta.NodeID))
-		corrID, bytesWritten, writeWait, timeToWrite, readEnqueue, writeErr := cxn.writeRequest(nil, time.Now(), req)
+		cxn.cl.cfg.logger.Log(LogLevelDebug, "issuing SASLHandshakeRequest", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId)
+		corrID, bytesWritten, writeWait, timeToWrite, readEnqueue, writeErr := cxn.writeRequest(nil, time.Now(), req, requestId)
 		if writeErr != nil {
 			cxn.hookWriteE2E(req.Key(), bytesWritten, writeWait, timeToWrite, writeErr)
+			cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-sasl-SASLHandshakeRequest-writeError", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId, "err", writeErr)
 			return writeErr
 		}
 
@@ -774,29 +787,26 @@ start:
 					}
 				}
 			}
+			cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-sasl-SASLHandshakeResponseeError", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId, "err", writeErr)
 			return err
 		}
 		authenticate = req.Version == 1
 	}
 	cxn.cl.cfg.logger.Log(LogLevelDebug, "beginning sasl authentication", "broker", logID(cxn.b.meta.NodeID), "mechanism", mechanism.Name(), "authenticate", authenticate)
 	cxn.mechanism = mechanism
-	return cxn.doSasl(authenticate)
+	return cxn.doSasl(authenticate, requestId)
 }
 
-func (cxn *brokerCxn) doSasl(authenticate bool) error {
+func (cxn *brokerCxn) doSasl(authenticate bool, requestId string) error {
 	session, clientWrite, err := cxn.mechanism.Authenticate(cxn.cl.ctx, cxn.addr)
-	requestId, uuidErr := uuid.GenerateUUID()
-	if uuidErr != nil {
-		requestId = time.Now().String()
-	}
 	if err != nil {
-		cxn.cl.cfg.logger.Log(LogLevelDebug, "doSasl has early errors", "err", err, "requestId", requestId)
+		cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-doSasl has early errors", "err", err, "requestId", requestId, "broker", logID(cxn.b.meta.NodeID))
 		return err
 	}
 	if len(clientWrite) == 0 {
 		return fmt.Errorf("unexpected server-write sasl with mechanism %s", cxn.mechanism.Name())
 	}
-	cxn.cl.cfg.logger.Log(LogLevelDebug, "doSasl ", "session", session, "challenge", string(clientWrite), "requestId", requestId)
+	cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-doSasl ", "session", session, "challenge", string(clientWrite), "requestId", requestId, "broker", logID(cxn.b.meta.NodeID))
 
 	prereq := time.Now() // used below for sasl lifetime calculation
 	var lifetimeMillis int64
@@ -820,7 +830,7 @@ func (cxn *brokerCxn) doSasl(authenticate bool) error {
 			binary.BigEndian.PutUint32(buf, uint32(len(clientWrite)))
 			buf = append(buf, clientWrite...)
 
-			cxn.cl.cfg.logger.Log(LogLevelDebug, "issuing raw sasl authenticate", "broker", logID(cxn.b.meta.NodeID), "step", step, "requestId", requestId)
+			cxn.cl.cfg.logger.Log(LogLevelDebug, "issuing raw sasl authenticate", "broker", logID(cxn.b.meta.NodeID), "step", step, "requestId", requestId, "broker", logID(cxn.b.meta.NodeID))
 			_, _, _, _, err = cxn.writeConn(context.Background(), buf, wt, time.Now())
 
 			cxn.cl.bufPool.put(buf)
@@ -837,12 +847,12 @@ func (cxn *brokerCxn) doSasl(authenticate bool) error {
 			req := kmsg.NewPtrSASLAuthenticateRequest()
 			req.SASLAuthBytes = clientWrite
 			req.Version = cxn.b.loadVersions().versions[req.Key()]
-			cxn.cl.cfg.logger.Log(LogLevelDebug, "issuing SASLAuthenticate", "broker", logID(cxn.b.meta.NodeID), "version", req.Version, "step", step, "requestId", requestId)
+			cxn.cl.cfg.logger.Log(LogLevelDebug, "issuing SASLAuthenticate", "broker", logID(cxn.b.meta.NodeID), "version", req.Version, "step", step, "requestId", requestId, "broker", logID(cxn.b.meta.NodeID))
 
 			// Lifetime: we take the timestamp before we write our
 			// request; see usage below for why.
 			prereq = time.Now()
-			corrID, bytesWritten, writeWait, timeToWrite, readEnqueue, writeErr := cxn.writeRequest(nil, time.Now(), req)
+			corrID, bytesWritten, writeWait, timeToWrite, readEnqueue, writeErr := cxn.writeRequest(nil, time.Now(), req, requestId)
 
 			// As mentioned above, we could have one final write
 			// without reading a response back (kerberos). If this
@@ -850,6 +860,7 @@ func (cxn *brokerCxn) doSasl(authenticate bool) error {
 			if writeErr != nil || done {
 				cxn.hookWriteE2E(req.Key(), bytesWritten, writeWait, timeToWrite, writeErr)
 				if writeErr != nil {
+					cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-doSasl write error", "broker", logID(cxn.b.meta.NodeID), "version", req.Version, "step", step, "requestId", requestId, "err", writeErr)
 					return writeErr
 				}
 			}
@@ -864,7 +875,7 @@ func (cxn *brokerCxn) doSasl(authenticate bool) error {
 				}
 
 				if err = kerr.ErrorForCode(resp.ErrorCode); err != nil {
-					cxn.cl.cfg.logger.Log(LogLevelDebug, "doSasl TAF error", "corrID", corrID, "requestId", requestId)
+					cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-doSasl TAF error", "corrID", corrID, "requestId", requestId, "broker", logID(cxn.b.meta.NodeID))
 					if resp.ErrorMessage != nil {
 						return fmt.Errorf("%s: %w", *resp.ErrorMessage, err)
 					}
@@ -873,8 +884,8 @@ func (cxn *brokerCxn) doSasl(authenticate bool) error {
 				challenge = resp.SASLAuthBytes
 				lifetimeMillis = resp.SessionLifetimeMillis
 				if lifetimeMillis == 0 {
-					cxn.cl.cfg.logger.Log(LogLevelDebug, "doSasl has values ",
-						"lifetimeMillis", lifetimeMillis, "corrID", corrID, "requestId", requestId)
+					cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-doSasl has values ",
+						"lifetimeMillis", lifetimeMillis, "corrID", corrID, "requestId", requestId, "broker", logID(cxn.b.meta.NodeID))
 				}
 			}
 		}
@@ -883,7 +894,7 @@ func (cxn *brokerCxn) doSasl(authenticate bool) error {
 
 		if !done {
 			if done, clientWrite, err = session.Challenge(challenge); err != nil {
-				cxn.cl.cfg.logger.Log(LogLevelDebug, "sasl has errors ", "error", err, "requestId", requestId)
+				cxn.cl.cfg.logger.Log(LogLevelDebug, "sasl has errors ", "error", err, "requestId", requestId, "broker", logID(cxn.b.meta.NodeID))
 				return err
 			}
 		}
@@ -942,7 +953,7 @@ func maybeUpdateCtxErr(clientCtx, reqCtx context.Context, err *error) {
 
 // writeRequest writes a message request to the broker connection, bumping the
 // connection's correlation ID as appropriate for the next write.
-func (cxn *brokerCxn) writeRequest(ctx context.Context, enqueuedForWritingAt time.Time, req kmsg.Request) (corrID int32, bytesWritten int, writeWait, timeToWrite time.Duration, readEnqueue time.Time, writeErr error) {
+func (cxn *brokerCxn) writeRequest(ctx context.Context, enqueuedForWritingAt time.Time, req kmsg.Request, requestId string) (corrID int32, bytesWritten int, writeWait, timeToWrite time.Duration, readEnqueue time.Time, writeErr error) {
 	// A nil ctx means we cannot be throttled.
 	if ctx != nil {
 		throttleUntil := time.Unix(0, atomic.LoadInt64(&cxn.throttleUntil))
@@ -1224,6 +1235,7 @@ func (cxn *brokerCxn) die() {
 	}
 	cxn.closeConn()
 	cxn.resps.die()
+	cxn.b.cl.cfg.logger.Log(LogLevelDebug, "killed connection", "addr", cxn.b.addr, "broker", logID(cxn.b.meta.NodeID))
 }
 
 // waitResp, called serially by a broker's handleReqs, manages handling a
