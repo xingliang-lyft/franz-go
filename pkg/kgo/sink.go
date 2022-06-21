@@ -362,7 +362,8 @@ func (s *sink) produce(sem <-chan struct{}) bool {
 
 	batches := req.batches.sliced()
 	var requestId string
-	if s.cl.ctx.Value("requestId") == nil {
+
+	if _, ok := s.cl.ctx.Value("requestId").(string); !ok {
 		uuidStr, err := uuid.GenerateUUID()
 		if err != nil {
 			requestId = "nil-request-id"
@@ -911,7 +912,7 @@ func (s *sink) handleRetryBatches(
 	retry seqRecBatches,
 	backoffSeq uint32,
 	updateMeta bool, // if we should maybe update the metadata
-	canFail bool, // if records can fail if they are at limits
+	canFail bool,    // if records can fail if they are at limits
 	why string,
 ) {
 	var needsMetaUpdate bool

@@ -263,11 +263,16 @@ start:
 
 func (b *broker) handleReq(pr promisedReq) {
 	req := pr.req
-	requestId := pr.ctx.Value("requestId").(string)
+	var requestId string
+	if _, ok := pr.ctx.Value("requestId").(string); ok {
+		requestId = pr.ctx.Value("requestId").(string)
+	} else {
+		requestId = "empty-request-id"
+	}
 	var cxn *brokerCxn
 	{
 		var err error
-		if cxn, err = b.loadConnection(pr.ctx, req); err != nil {
+		if cxn, err = b.loadConnection(requestId, pr.ctx, req); err != nil {
 			cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-loadConnections-Error", "err", err, "requestId", requestId)
 			pr.promise(nil, err)
 			return
@@ -406,7 +411,7 @@ func (b *broker) handleReq(pr promisedReq) {
 
 	rt, _ := cxn.cl.connTimeouter.timeouts(req)
 
-	cxn.waitResp(promisedResp{
+	cxn.waitResp(requestId, promisedResp{
 		pr.ctx,
 		corrID,
 		req.IsFlexible() && req.Key() != 18, // response header not flexible if ApiVersions; see promisedResp doc
@@ -447,7 +452,7 @@ func (p bufPool) put(b []byte) { p.p.Put(&b) }
 
 // loadConection returns the broker's connection, creating it if necessary
 // and returning an error of if that fails.
-func (b *broker) loadConnection(ctx context.Context, req kmsg.Request) (*brokerCxn, error) {
+func (b *broker) loadConnection(requestId string, ctx context.Context, req kmsg.Request) (*brokerCxn, error) {
 	var (
 		pcxn         = &b.cxnNormal
 		isProduceCxn bool // see docs on brokerCxn.discard for why we do this
@@ -470,7 +475,7 @@ func (b *broker) loadConnection(ctx context.Context, req kmsg.Request) (*brokerC
 		return *pcxn, nil
 	}
 
-	conn, err := b.connect(ctx)
+	conn, err := b.connect(requestId, ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -483,7 +488,6 @@ func (b *broker) loadConnection(ctx context.Context, req kmsg.Request) (*brokerC
 		conn:   conn,
 		deadCh: make(chan struct{}),
 	}
-	requestId := ctx.Value("requestId").(string)
 	if err = cxn.init(isProduceCxn, requestId); err != nil {
 		b.cl.cfg.logger.Log(LogLevelDebug, "connection initialization failed", "addr", b.addr, "broker", logID(b.meta.NodeID), "err", err, "requestId", requestId)
 		cxn.closeConn()
@@ -577,8 +581,8 @@ func (b *broker) reapConnections(idleTimeout time.Duration) (total int) {
 }
 
 // connect connects to the broker's addr, returning the new connection.
-func (b *broker) connect(ctx context.Context) (net.Conn, error) {
-	b.cl.cfg.logger.Log(LogLevelDebug, "opening connection to broker", "addr", b.addr, "broker", logID(b.meta.NodeID), ctx.Value("requestId"))
+func (b *broker) connect(requestId string, ctx context.Context) (net.Conn, error) {
+	b.cl.cfg.logger.Log(LogLevelDebug, "opening connection to broker", "addr", b.addr, "broker", logID(b.meta.NodeID), "requestId", requestId)
 	start := time.Now()
 	conn, err := b.cl.cfg.dialFn(ctx, "tcp", b.addr)
 	since := time.Since(start)
@@ -589,11 +593,11 @@ func (b *broker) connect(ctx context.Context) (net.Conn, error) {
 	})
 	if err != nil {
 		if !errors.Is(err, ErrClientClosed) && !strings.Contains(err.Error(), "operation was canceled") {
-			b.cl.cfg.logger.Log(LogLevelWarn, "unable to open connection to broker", "addr", b.addr, "broker", logID(b.meta.NodeID), "err", err, ctx.Value("requestId"))
+			b.cl.cfg.logger.Log(LogLevelWarn, "unable to open connection to broker", "addr", b.addr, "broker", logID(b.meta.NodeID), "err", err, "requestId", requestId)
 		}
 		return nil, fmt.Errorf("unable to dial: %w", err)
 	}
-	b.cl.cfg.logger.Log(LogLevelDebug, "connection opened to broker", "addr", b.addr, "broker", logID(b.meta.NodeID), ctx.Value("requestId"))
+	b.cl.cfg.logger.Log(LogLevelDebug, "connection opened to broker", "addr", b.addr, "broker", logID(b.meta.NodeID), "requestId", requestId)
 	return conn, nil
 }
 
@@ -1238,10 +1242,10 @@ func (cxn *brokerCxn) die() {
 
 // waitResp, called serially by a broker's handleReqs, manages handling a
 // message requests's response.
-func (cxn *brokerCxn) waitResp(pr promisedResp) {
+func (cxn *brokerCxn) waitResp(requestId string, pr promisedResp) {
 	first, dead := cxn.resps.push(pr)
 	if first {
-		go cxn.handleResps(pr)
+		go cxn.handleResps(requestId, pr)
 	} else if dead {
 		pr.promise(nil, errChosenBrokerDead)
 		cxn.hookWriteE2E(pr.resp.Key(), pr.bytesWritten, pr.writeWait, pr.timeToWrite, errChosenBrokerDead)
@@ -1385,14 +1389,14 @@ func (cxn *brokerCxn) discard() {
 }
 
 // handleResps serially handles all broker responses for an single connection.
-func (cxn *brokerCxn) handleResps(pr promisedResp) {
+func (cxn *brokerCxn) handleResps(requestId string, pr promisedResp) {
 	var more, dead bool
 start:
 	if dead {
 		pr.promise(nil, errChosenBrokerDead)
 		cxn.hookWriteE2E(pr.resp.Key(), pr.bytesWritten, pr.writeWait, pr.timeToWrite, errChosenBrokerDead)
 	} else {
-		cxn.handleResp(pr)
+		cxn.handleResp(requestId, pr)
 	}
 
 	pr, more, dead = cxn.resps.dropPeek()
@@ -1401,7 +1405,7 @@ start:
 	}
 }
 
-func (cxn *brokerCxn) handleResp(pr promisedResp) {
+func (cxn *brokerCxn) handleResp(requestId string, pr promisedResp) {
 	rawResp, err := cxn.readResponse(
 		pr.ctx,
 		pr.resp.Key(),
@@ -1452,7 +1456,7 @@ func (cxn *brokerCxn) handleResp(pr promisedResp) {
 			}
 		}
 	} else {
-		cxn.b.cl.cfg.logger.Log(LogLevelDebug, "read error from broker errored", "addr", cxn.b.addr, "broker", logID(cxn.b.meta.NodeID), "successful_reads", cxn.successes, "err", err, "requestId", pr.ctx.Value("requestId"))
+		cxn.b.cl.cfg.logger.Log(LogLevelDebug, "read error from broker errored", "addr", cxn.b.addr, "broker", logID(cxn.b.meta.NodeID), "successful_reads", cxn.successes, "err", err, "requestId", requestId)
 	}
 
 	pr.promise(pr.resp, readErr)

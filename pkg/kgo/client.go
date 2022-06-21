@@ -496,7 +496,12 @@ func (cl *Client) fetchMetadata(ctx context.Context, req *kmsg.MetadataRequest, 
 	if limitRetries {
 		r.limitRetries = 3
 	}
-
+	var requestId string
+	if _, ok := ctx.Value("requestId").(string); ok {
+		requestId = ctx.Value("requestId").(string)
+	} else {
+		requestId = "empty-request-id"
+	}
 	meta, err := req.RequestWith(ctx, r)
 	if err == nil {
 		if meta.ControllerID >= 0 {
@@ -506,7 +511,7 @@ func (cl *Client) fetchMetadata(ctx context.Context, req *kmsg.MetadataRequest, 
 		}
 		cl.updateBrokers(meta.Brokers)
 	} else {
-		cl.cfg.logger.Log(LogLevelDebug, "xing-fetchMetadata err", "err", err, "requestId", ctx.Value("requestId"))
+		cl.cfg.logger.Log(LogLevelDebug, "xing-fetchMetadata err", "err", err, "requestId", requestId)
 	}
 	return r.last, meta, err
 }
