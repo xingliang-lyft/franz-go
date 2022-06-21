@@ -323,7 +323,7 @@ func (b *broker) handleReq(pr promisedReq) {
 
 	req.SetVersion(version) // always go for highest version
 
-	cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-expiry time for cxn", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId, "expiry", cxn.expiry)
+	cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-expiry time for cxn", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId, "expiry", cxn.expiry.UTC().String())
 	for reauthentications := 1; !cxn.expiry.IsZero() && time.Now().After(cxn.expiry); reauthentications++ {
 		// We allow 15 reauths, which is a lot. If a new lifetime is
 		// <2.5s, we sleep 100ms and try again. Retrying 15x puts us at

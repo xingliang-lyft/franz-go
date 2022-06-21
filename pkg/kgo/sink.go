@@ -648,6 +648,7 @@ func (s *sink) handleReqResp(br *broker, req *produceRequest, resp kmsg.Response
 				req.producerEpoch,
 				rPartition.BaseOffset,
 				rPartition.ErrorCode,
+				requestId,
 			)
 			if retry {
 				reqRetry.addSeqBatch(topic, partition, batch)
@@ -687,6 +688,7 @@ func (s *sink) handleReqRespBatch(
 	producerEpoch int16,
 	baseOffset int64,
 	errorCode int16,
+	requestId string,
 ) (retry, didProduce bool) {
 	batch.owner.mu.Lock()
 	defer batch.owner.mu.Unlock()
@@ -843,6 +845,7 @@ func (s *sink) handleReqRespBatch(
 				"err", err,
 				"err_is_retriable", kerr.IsRetriable(err),
 				"max_retries_reached", !failUnknown && batch.tries >= s.cl.cfg.recordRetries,
+				"requestId", requestId,
 			)
 		}
 		s.cl.finishBatch(batch.recBatch, producerID, producerEpoch, partition, baseOffset, err)
@@ -912,7 +915,7 @@ func (s *sink) handleRetryBatches(
 	retry seqRecBatches,
 	backoffSeq uint32,
 	updateMeta bool, // if we should maybe update the metadata
-	canFail bool,    // if records can fail if they are at limits
+	canFail bool, // if records can fail if they are at limits
 	why string,
 ) {
 	var needsMetaUpdate bool
