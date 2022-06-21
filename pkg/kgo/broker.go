@@ -473,7 +473,7 @@ func (b *broker) loadConnection(requestId string, ctx context.Context, req kmsg.
 	}
 
 	if *pcxn != nil && atomic.LoadInt32(&(*pcxn).dead) == 0 {
-		b.cl.cfg.logger.Log(LogLevelDebug, "xing-connection already exists", "addr", b.addr, "broker", logID(b.meta.NodeID), "requestId", requestId, "authRequestId", pcxn.AuthRequestId)
+		b.cl.cfg.logger.Log(LogLevelDebug, "xing-connection already exists", "addr", b.addr, "broker", logID(b.meta.NodeID), "requestId", requestId, "authRequestId", (*pcxn).AuthRequestId)
 		return *pcxn, nil
 	}
 
