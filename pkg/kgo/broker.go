@@ -324,7 +324,7 @@ func (b *broker) handleReq(pr promisedReq) {
 	req.SetVersion(version) // always go for highest version
 
 	now := time.Now()
-	cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-expiry time for cxn", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId, "expiry", cxn.expiry.UTC().String(), "now at", now, "is after", now.After(cxn.expiry))
+	cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-expiry time for cxn", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId, "expiry", cxn.expiry.UTC().String(), "now at", now, "is after", now.After(cxn.expiry), "authRequestId", cxn.AuthRequestId)
 	for reauthentications := 1; !cxn.expiry.IsZero() && time.Now().After(cxn.expiry); reauthentications++ {
 		// We allow 15 reauths, which is a lot. If a new lifetime is
 		// <2.5s, we sleep 100ms and try again. Retrying 15x puts us at
@@ -412,7 +412,7 @@ func (b *broker) handleReq(pr promisedReq) {
 
 	rt, _ := cxn.cl.connTimeouter.timeouts(req)
 
-	cxn.waitResp(requestId, promisedResp{
+	cxn.waitResp(requestId, cxn.AuthRequestId, promisedResp{
 		pr.ctx,
 		corrID,
 		req.IsFlexible() && req.Key() != 18, // response header not flexible if ApiVersions; see promisedResp doc
@@ -473,6 +473,7 @@ func (b *broker) loadConnection(requestId string, ctx context.Context, req kmsg.
 	}
 
 	if *pcxn != nil && atomic.LoadInt32(&(*pcxn).dead) == 0 {
+		b.cl.cfg.logger.Log(LogLevelDebug, "xing-connection already exists", "addr", b.addr, "broker", logID(b.meta.NodeID), "requestId", requestId, "authRequestId", pcxn.AuthRequestId)
 		return *pcxn, nil
 	}
 
@@ -634,7 +635,8 @@ type brokerCxn struct {
 	// dead is an atomic so that a backed up resps cannot block cxn death.
 	dead int32
 	// closed in cloneConn; allows throttle waiting to quit
-	deadCh chan struct{}
+	deadCh        chan struct{}
+	AuthRequestId string
 }
 
 func (cxn *brokerCxn) init(isProduceCxn bool, requestId string) error {
@@ -797,6 +799,7 @@ start:
 	}
 	cxn.cl.cfg.logger.Log(LogLevelDebug, "beginning sasl authentication", "broker", logID(cxn.b.meta.NodeID), "mechanism", mechanism.Name(), "authenticate", authenticate)
 	cxn.mechanism = mechanism
+
 	return cxn.doSasl(authenticate, requestId)
 }
 
@@ -810,7 +813,7 @@ func (cxn *brokerCxn) doSasl(authenticate bool, requestId string) error {
 		return fmt.Errorf("unexpected server-write sasl with mechanism %s", cxn.mechanism.Name())
 	}
 	cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-doSasl ", "session", session, "challenge", string(clientWrite), "requestId", requestId, "broker", logID(cxn.b.meta.NodeID))
-
+	cxn.AuthRequestId = requestId
 	prereq := time.Now() // used below for sasl lifetime calculation
 	var lifetimeMillis int64
 
@@ -1243,7 +1246,7 @@ func (cxn *brokerCxn) die() {
 
 // waitResp, called serially by a broker's handleReqs, manages handling a
 // message requests's response.
-func (cxn *brokerCxn) waitResp(requestId string, pr promisedResp) {
+func (cxn *brokerCxn) waitResp(requestId string, authRequestId string, pr promisedResp) {
 	first, dead := cxn.resps.push(pr)
 	if first {
 		go cxn.handleResps(requestId, pr)

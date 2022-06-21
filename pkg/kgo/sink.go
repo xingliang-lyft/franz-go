@@ -365,6 +365,7 @@ func (s *sink) produce(sem <-chan struct{}) bool {
 
 	if _, ok := s.cl.ctx.Value("requestId").(string); !ok {
 		uuidStr, err := uuid.GenerateUUID()
+		s.cl.cfg.logger.Log(LogLevelDebug, "request id does not exists. Creating our own.", "requestId", uuidStr)
 		if err != nil {
 			requestId = "nil-request-id"
 		} else {
@@ -375,7 +376,12 @@ func (s *sink) produce(sem <-chan struct{}) bool {
 	}
 	s.doSequenced(req, requestId, func(br *broker, resp kmsg.Response, err error) {
 		s.cl.producer.decInflight()
-		s.handleReqResp(br, req, resp, requestId, err)
+		authRequestId := "empty-auth-request-id"
+		if br.cxnProduce != nil {
+			s.cl.cfg.logger.Log(LogLevelDebug, "cxnProduce", "authRequestId", br.cxnProduce.AuthRequestId, "requestId", requestId)
+			authRequestId = br.cxnProduce.AuthRequestId
+		}
+		s.handleReqResp(br, req, resp, requestId, authRequestId, err)
 		batches.eachOwnerLocked((*recBatch).decInflight)
 		<-sem
 	})
@@ -587,7 +593,7 @@ func (s *sink) handleReqRespNoack(b *bytes.Buffer, debug bool, req *produceReque
 	}
 }
 
-func (s *sink) handleReqResp(br *broker, req *produceRequest, resp kmsg.Response, requestId string, err error) {
+func (s *sink) handleReqResp(br *broker, req *produceRequest, resp kmsg.Response, requestId string, authRequestId string, err error) {
 	if err != nil {
 		s.handleReqClientErr(req, err)
 		return
@@ -649,6 +655,7 @@ func (s *sink) handleReqResp(br *broker, req *produceRequest, resp kmsg.Response
 				rPartition.BaseOffset,
 				rPartition.ErrorCode,
 				requestId,
+				authRequestId,
 			)
 			if retry {
 				reqRetry.addSeqBatch(topic, partition, batch)
@@ -689,6 +696,7 @@ func (s *sink) handleReqRespBatch(
 	baseOffset int64,
 	errorCode int16,
 	requestId string,
+	authRequestId string,
 ) (retry, didProduce bool) {
 	batch.owner.mu.Lock()
 	defer batch.owner.mu.Unlock()
@@ -846,6 +854,7 @@ func (s *sink) handleReqRespBatch(
 				"err_is_retriable", kerr.IsRetriable(err),
 				"max_retries_reached", !failUnknown && batch.tries >= s.cl.cfg.recordRetries,
 				"requestId", requestId,
+				"authRequestId", authRequestId,
 			)
 		}
 		s.cl.finishBatch(batch.recBatch, producerID, producerEpoch, partition, baseOffset, err)
