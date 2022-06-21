@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hashicorp/go-uuid"
 	"github.com/twmb/franz-go/pkg/kbin"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kmsg"
@@ -360,9 +361,20 @@ func (s *sink) produce(sem <-chan struct{}) bool {
 	produced = true
 
 	batches := req.batches.sliced()
-	s.doSequenced(req, func(br *broker, resp kmsg.Response, err error) {
+	var requestId string
+	if s.cl.ctx.Value("requestId") == nil {
+		uuidStr, err := uuid.GenerateUUID()
+		if err != nil {
+			requestId = "nil-request-id"
+		} else {
+			requestId = uuidStr
+		}
+	} else {
+		requestId = s.cl.ctx.Value("requestId").(string)
+	}
+	s.doSequenced(req, requestId, func(br *broker, resp kmsg.Response, err error) {
 		s.cl.producer.decInflight()
-		s.handleReqResp(br, req, resp, err)
+		s.handleReqResp(br, req, resp, requestId, err)
 		batches.eachOwnerLocked((*recBatch).decInflight)
 		<-sem
 	})
@@ -373,6 +385,7 @@ func (s *sink) produce(sem <-chan struct{}) bool {
 // are handled in order. We use this guarantee while in handleReqResp below.
 func (s *sink) doSequenced(
 	req kmsg.Request,
+	requestId string,
 	promise func(*broker, kmsg.Response, error),
 ) {
 	wait := &seqResp{
@@ -385,7 +398,8 @@ func (s *sink) doSequenced(
 		wait.err = err
 		close(wait.done)
 	} else {
-		br.do(s.cl.ctx, req, func(resp kmsg.Response, err error) {
+		ctx := context.WithValue(s.cl.ctx, "requestId", requestId)
+		br.do(ctx, req, func(resp kmsg.Response, err error) {
 			wait.resp = resp
 			wait.err = err
 			close(wait.done)
@@ -572,7 +586,7 @@ func (s *sink) handleReqRespNoack(b *bytes.Buffer, debug bool, req *produceReque
 	}
 }
 
-func (s *sink) handleReqResp(br *broker, req *produceRequest, resp kmsg.Response, err error) {
+func (s *sink) handleReqResp(br *broker, req *produceRequest, resp kmsg.Response, requestId string, err error) {
 	if err != nil {
 		s.handleReqClientErr(req, err)
 		return
