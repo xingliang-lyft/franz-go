@@ -365,6 +365,7 @@ func (cl *Client) bumpMetadataFailForTopics(requested map[string]*topicPartition
 
 	// mode 1
 	if len(missingTopics) == 0 {
+		cl.cfg.logger.Log(LogLevelDebug, "xing-no missing topics but request failed", "err", err)
 		for _, topic := range requested {
 			for _, topicPartition := range topic.load().partitions {
 				topicPartition.records.bumpRepeatedLoadErr(err)
@@ -375,6 +376,7 @@ func (cl *Client) bumpMetadataFailForTopics(requested map[string]*topicPartition
 	// mode 2
 	var missing map[string]bool
 	for _, failTopic := range missingTopics {
+		cl.cfg.logger.Log(LogLevelDebug, "xing-missing topics", "topic", failTopic, "err", err)
 		if missing == nil {
 			missing = make(map[string]bool, len(missingTopics))
 		}

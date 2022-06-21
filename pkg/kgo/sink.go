@@ -1235,6 +1235,7 @@ func (recBuf *recBuf) bumpRepeatedLoadErr(err error) {
 	isUnknownLimit := recBuf.checkUnknownFailLimit(err)    // or if it is, but it is UnknownTopicOrPartition and we are at our limit
 
 	if batch0Fail || okNet && (!retriableKerr || retriableKerr && isUnknownLimit) {
+		recBuf.cl.cfg.logger.Log(LogLevelDebug, "xing-fail all records", "batch0Fail", batch0Fail, "okNet", okNet, "retriableKerr", retriableKerr, "isUnknownLimit", isUnknownLimit)
 		recBuf.failAllRecords(err)
 	}
 }
@@ -1658,13 +1659,13 @@ func (cl *Client) baseProduceRequestLength() int32 {
 		2 + // int16 version
 		4 + // int32 correlation ID
 		2 // int16 client ID len (always non flexible)
-		// empty tag section skipped; see below
+	// empty tag section skipped; see below
 
 	const produceRequestBaseOverhead int32 = 2 + // int16 transactional ID len (flexible or not, since we cap at 16382)
 		2 + // int16 acks
 		4 + // int32 timeout
 		4 // int32 topics non-flexible array length
-		// empty tag section skipped; see below
+	// empty tag section skipped; see below
 
 	baseLength := messageRequestOverhead + produceRequestBaseOverhead
 	if cl.cfg.id != nil {

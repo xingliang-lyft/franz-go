@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/hashicorp/go-uuid"
 	"hash/crc32"
 	"math/rand"
 	"net"
@@ -504,6 +505,8 @@ func (cl *Client) fetchMetadata(ctx context.Context, req *kmsg.MetadataRequest, 
 			cl.controllerIDMu.Unlock()
 		}
 		cl.updateBrokers(meta.Brokers)
+	} else {
+		cl.cfg.logger.Log(LogLevelDebug, "xing-fetchMetadata err", "err", err, "requestId", ctx.Value("requestId"))
 	}
 	return r.last, meta, err
 }
@@ -666,7 +669,12 @@ func (cl *Client) Close() {
 // configuration, and it will rewrite the timeout millis if the acks is 0. It
 // is strongly recommended to not issue raw kmsg.ProduceRequest's.
 func (cl *Client) Request(ctx context.Context, req kmsg.Request) (kmsg.Response, error) {
-	resps, merge := cl.shardedRequest(ctx, req)
+	requestId, uuidErr := uuid.GenerateUUID()
+	if uuidErr != nil {
+		requestId = "empty-request-id"
+	}
+	newCtx := context.WithValue(ctx, "requestId", requestId)
+	resps, merge := cl.shardedRequest(newCtx, req)
 	// If there is no merge function, only one request was issued directly
 	// to a broker. Return the resp and err directly.
 	if merge == nil {

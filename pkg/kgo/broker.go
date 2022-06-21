@@ -16,7 +16,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/hashicorp/go-uuid"
 	"github.com/twmb/franz-go/pkg/kbin"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kmsg"
@@ -264,14 +263,11 @@ start:
 
 func (b *broker) handleReq(pr promisedReq) {
 	req := pr.req
-	requestId, uuidErr := uuid.GenerateUUID()
-	if uuidErr != nil {
-		requestId = time.Now().String()
-	}
+	requestId := pr.ctx.Value("requestId").(string)
 	var cxn *brokerCxn
 	{
 		var err error
-		if cxn, err = b.loadConnection(pr.ctx, req, requestId); err != nil {
+		if cxn, err = b.loadConnection(pr.ctx, req); err != nil {
 			cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-loadConnections-Error", "err", err, "requestId", requestId)
 			pr.promise(nil, err)
 			return
@@ -322,6 +318,7 @@ func (b *broker) handleReq(pr promisedReq) {
 
 	req.SetVersion(version) // always go for highest version
 
+	cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-expiry time for cxn", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId, "expiry", cxn.expiry)
 	for reauthentications := 1; !cxn.expiry.IsZero() && time.Now().After(cxn.expiry); reauthentications++ {
 		// We allow 15 reauths, which is a lot. If a new lifetime is
 		// <2.5s, we sleep 100ms and try again. Retrying 15x puts us at
@@ -450,7 +447,7 @@ func (p bufPool) put(b []byte) { p.p.Put(&b) }
 
 // loadConection returns the broker's connection, creating it if necessary
 // and returning an error of if that fails.
-func (b *broker) loadConnection(ctx context.Context, req kmsg.Request, requestId string) (*brokerCxn, error) {
+func (b *broker) loadConnection(ctx context.Context, req kmsg.Request) (*brokerCxn, error) {
 	var (
 		pcxn         = &b.cxnNormal
 		isProduceCxn bool // see docs on brokerCxn.discard for why we do this
@@ -486,8 +483,9 @@ func (b *broker) loadConnection(ctx context.Context, req kmsg.Request, requestId
 		conn:   conn,
 		deadCh: make(chan struct{}),
 	}
+	requestId := ctx.Value("requestId").(string)
 	if err = cxn.init(isProduceCxn, requestId); err != nil {
-		b.cl.cfg.logger.Log(LogLevelDebug, "connection initialization failed", "addr", b.addr, "broker", logID(b.meta.NodeID), "err", err, requestId)
+		b.cl.cfg.logger.Log(LogLevelDebug, "connection initialization failed", "addr", b.addr, "broker", logID(b.meta.NodeID), "err", err, "requestId", requestId)
 		cxn.closeConn()
 		return nil, err
 	}
@@ -580,7 +578,7 @@ func (b *broker) reapConnections(idleTimeout time.Duration) (total int) {
 
 // connect connects to the broker's addr, returning the new connection.
 func (b *broker) connect(ctx context.Context) (net.Conn, error) {
-	b.cl.cfg.logger.Log(LogLevelDebug, "opening connection to broker", "addr", b.addr, "broker", logID(b.meta.NodeID))
+	b.cl.cfg.logger.Log(LogLevelDebug, "opening connection to broker", "addr", b.addr, "broker", logID(b.meta.NodeID), ctx.Value("requestId"))
 	start := time.Now()
 	conn, err := b.cl.cfg.dialFn(ctx, "tcp", b.addr)
 	since := time.Since(start)
@@ -591,11 +589,11 @@ func (b *broker) connect(ctx context.Context) (net.Conn, error) {
 	})
 	if err != nil {
 		if !errors.Is(err, ErrClientClosed) && !strings.Contains(err.Error(), "operation was canceled") {
-			b.cl.cfg.logger.Log(LogLevelWarn, "unable to open connection to broker", "addr", b.addr, "broker", logID(b.meta.NodeID), "err", err)
+			b.cl.cfg.logger.Log(LogLevelWarn, "unable to open connection to broker", "addr", b.addr, "broker", logID(b.meta.NodeID), "err", err, ctx.Value("requestId"))
 		}
 		return nil, fmt.Errorf("unable to dial: %w", err)
 	}
-	b.cl.cfg.logger.Log(LogLevelDebug, "connection opened to broker", "addr", b.addr, "broker", logID(b.meta.NodeID))
+	b.cl.cfg.logger.Log(LogLevelDebug, "connection opened to broker", "addr", b.addr, "broker", logID(b.meta.NodeID), ctx.Value("requestId"))
 	return conn, nil
 }
 
@@ -652,7 +650,7 @@ func (cxn *brokerCxn) init(isProduceCxn bool, requestId string) error {
 		}
 	}
 
-	if err := cxn.sasl(""); err != nil {
+	if err := cxn.sasl(requestId); err != nil {
 		if !errors.Is(err, ErrClientClosed) {
 			cxn.cl.cfg.logger.Log(LogLevelError, "unable to initialize sasl", "broker", logID(cxn.b.meta.NodeID), "err", err, "requestId", requestId)
 		}
@@ -1453,6 +1451,8 @@ func (cxn *brokerCxn) handleResp(pr promisedResp) {
 				})
 			}
 		}
+	} else {
+		cxn.b.cl.cfg.logger.Log(LogLevelDebug, "read error from broker errored", "addr", cxn.b.addr, "broker", logID(cxn.b.meta.NodeID), "successful_reads", cxn.successes, "err", err, "requestId", pr.ctx.Value("requestId"))
 	}
 
 	pr.promise(pr.resp, readErr)
