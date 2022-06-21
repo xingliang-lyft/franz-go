@@ -278,7 +278,7 @@ func (b *broker) handleReq(pr promisedReq) {
 			return
 		}
 	}
-	cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-loadConnections-success", "requestId", requestId)
+	cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-loadConnections-success", "requestId", requestId, "broker", logID(cxn.b.meta.NodeID))
 	v := b.loadVersions()
 
 	if int(req.Key()) > v.len() || b.cl.cfg.maxVersions != nil && !b.cl.cfg.maxVersions.HasKey(req.Key()) {
@@ -325,7 +325,7 @@ func (b *broker) handleReq(pr promisedReq) {
 
 	now := time.Now()
 	cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-expiry time for cxn", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId, "expiry", cxn.expiry.UTC().String(), "now at", now, "is after", now.After(cxn.expiry))
-	for reauthentications := 1; !cxn.expiry.IsZero() && time.Now().After(cxn.expiry.Add(100*time.Millisecond)); reauthentications++ {
+	for reauthentications := 1; !cxn.expiry.IsZero() && time.Now().After(cxn.expiry); reauthentications++ {
 		// We allow 15 reauths, which is a lot. If a new lifetime is
 		// <2.5s, we sleep 100ms and try again. Retrying 15x puts us at
 		// <1s compared to the original lifetime. A broker should not
@@ -902,7 +902,7 @@ func (cxn *brokerCxn) doSasl(authenticate bool, requestId string) error {
 			}
 		}
 	}
-	if lifetimeMillis >= 0 {
+	if lifetimeMillis > 0 {
 		// Lifetime: we could have written our request instantaenously,
 		// the broker calculating our session lifetime, and then the
 		// broker / network hung for a bit when writing. We
@@ -917,8 +917,8 @@ func (cxn *brokerCxn) doSasl(authenticate bool, requestId string) error {
 		// <100ms, we sleep for 100ms just to ensure we do not
 		// spin-loop reauthenticating *too* much.
 		latency := int64(float64(time.Since(prereq).Milliseconds()) * 1.1)
-		if latency < 2500 {
-			latency = 2500
+		if latency < 10000 {
+			latency = 10000
 		}
 
 		useLifetime := lifetimeMillis - latency
