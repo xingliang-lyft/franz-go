@@ -286,7 +286,7 @@ func (cl *Client) updateMetadata() (retryWhy multiUpdateWhy, err error) {
 		}
 	}
 
-	latest, err := cl.fetchTopicMetadata(all, reqTopics)
+	latest, requestId, err := cl.fetchTopicMetadata(all, reqTopics)
 	if err != nil {
 		cl.bumpMetadataFailForTopics( // bump load failures for all topics
 			tpsProducerLoad,
@@ -359,6 +359,7 @@ func (cl *Client) updateMetadata() (retryWhy multiUpdateWhy, err error) {
 				&reloadOffsets,
 				stopConsumerSession,
 				&retryWhy,
+				requestId,
 			)
 		}
 	}
@@ -375,11 +376,11 @@ func (cl *Client) updateMetadata() (retryWhy multiUpdateWhy, err error) {
 
 // fetchTopicMetadata fetches metadata for all reqTopics and returns new
 // topicPartitionsData for each topic.
-func (cl *Client) fetchTopicMetadata(all bool, reqTopics []string) (map[string]*topicPartitionsData, error) {
+func (cl *Client) fetchTopicMetadata(all bool, reqTopics []string) (map[string]*topicPartitionsData, string, error) {
 	_, meta, requestId, err := cl.fetchMetadataForTopics(cl.ctx, all, reqTopics)
 	if err != nil {
 		cl.cfg.logger.Log(LogLevelDebug, "xing-fetchMetadataForTopics error", "err", err, "requestId", requestId)
-		return nil, err
+		return nil, requestId, err
 	}
 
 	topics := make(map[string]*topicPartitionsData, len(meta.Topics))
@@ -515,7 +516,7 @@ func (cl *Client) fetchTopicMetadata(all bool, reqTopics []string) (map[string]*
 		}
 	}
 
-	return topics, nil
+	return topics, requestId, nil
 }
 
 // mergeTopicPartitions merges a new topicPartition into an old and returns
@@ -530,6 +531,7 @@ func (cl *Client) mergeTopicPartitions(
 	reloadOffsets *listOrEpochLoads,
 	stopConsumerSession func(),
 	retryWhy *multiUpdateWhy,
+	requestId string,
 ) {
 	lv := *l.load() // copy so our field writes do not collide with reads
 
@@ -553,7 +555,9 @@ func (cl *Client) mergeTopicPartitions(
 	if r.loadErr != nil {
 		if isProduce {
 			for _, topicPartition := range lv.partitions {
-				topicPartition.records.bumpRepeatedLoadErr(lv.loadErr)
+				recBuf := topicPartition.records
+				cl.cfg.logger.Log(LogLevelDebug, "load error in entire topic", "broker", logID(recBuf.sink.nodeID), "topic", recBuf.topic, "partition", recBuf.partition, "err", lv.loadErr, "requestId", requestId)
+				recBuf.bumpRepeatedLoadErr(lv.loadErr)
 			}
 		}
 		retryWhy.add(topic, -1, r.loadErr)
@@ -618,7 +622,9 @@ func (cl *Client) mergeTopicPartitions(
 			*newTP = *oldTP
 			newTP.loadErr = err
 			if isProduce {
-				newTP.records.bumpRepeatedLoadErr(newTP.loadErr)
+				recBuf := newTP.records
+				cl.cfg.logger.Log(LogLevelDebug, "load error in new partition", "broker", logID(recBuf.sink.nodeID), "topic", recBuf.topic, "partition", recBuf.partition, "err", lv.loadErr, "requestId", requestId)
+				recBuf.bumpRepeatedLoadErr(newTP.loadErr)
 			}
 			retryWhy.add(topic, int32(part), newTP.loadErr)
 			continue
@@ -673,6 +679,7 @@ func (cl *Client) mergeTopicPartitions(
 				"partition", part,
 				"leader", newTP.leader,
 				"leader_epoch", newTP.leaderEpoch,
+				"requestId", requestId,
 			)
 			if isProduce {
 				newTP.records = oldTP.records
@@ -688,6 +695,7 @@ func (cl *Client) mergeTopicPartitions(
 				"new_leader_epoch", newTP.leaderEpoch,
 				"old_leader", oldTP.leader,
 				"old_leader_epoch", oldTP.leaderEpoch,
+				"requestId", requestId,
 			)
 			if isProduce {
 				oldTP.migrateProductionTo(newTP) // migration clears failing state
