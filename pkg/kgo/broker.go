@@ -325,7 +325,7 @@ func (b *broker) handleReq(pr promisedReq) {
 
 	now := time.Now()
 	cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-expiry time for cxn", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId, "expiry", cxn.expiry.UTC().String(), "now at", now, "is after", now.After(cxn.expiry), "authRequestId", cxn.AuthRequestId)
-	for reauthentications := 1; !cxn.expiry.IsZero() && time.Now().After(cxn.expiry); reauthentications++ {
+	for reauthentications := 1; time.Now().After(cxn.expiry); reauthentications++ {
 		// We allow 15 reauths, which is a lot. If a new lifetime is
 		// <2.5s, we sleep 100ms and try again. Retrying 15x puts us at
 		// <1s compared to the original lifetime. A broker should not
@@ -891,7 +891,7 @@ func (cxn *brokerCxn) doSasl(authenticate bool, requestId string) error {
 				lifetimeMillis = resp.SessionLifetimeMillis
 				if lifetimeMillis == 0 {
 					cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-doSasl has values ",
-						"lifetimeMillis", lifetimeMillis, "corrID", corrID, "requestId", requestId, "broker", logID(cxn.b.meta.NodeID))
+						"lifetimeMillis", lifetimeMillis, "corrID", corrID, "requestId", requestId, "broker", logID(cxn.b.meta.NodeID), "challenge", string(clientWrite))
 				}
 			}
 		}
