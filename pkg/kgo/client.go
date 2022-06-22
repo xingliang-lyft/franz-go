@@ -459,12 +459,13 @@ func (cl *Client) fetchBrokerMetadata(ctx context.Context) error {
 		cl.fetchingBrokers = nil
 		close(wait.done)
 	}()
-
-	_, _, wait.err = cl.fetchMetadata(ctx, kmsg.NewPtrMetadataRequest(), true)
+	var requestId string
+	_, _, requestId, wait.err = cl.fetchMetadata(ctx, kmsg.NewPtrMetadataRequest(), true)
+	cl.cfg.logger.Log(LogLevelDebug, "xing-fetchBrokerMetadata err", "err", wait.err, "requestId", requestId)
 	return wait.err
 }
 
-func (cl *Client) fetchMetadataForTopics(ctx context.Context, all bool, topics []string) (*broker, *kmsg.MetadataResponse, error) {
+func (cl *Client) fetchMetadataForTopics(ctx context.Context, all bool, topics []string) (*broker, *kmsg.MetadataResponse, string, error) {
 	req := kmsg.NewPtrMetadataRequest()
 	req.AllowAutoTopicCreation = cl.cfg.allowAutoTopicCreation
 	if all {
@@ -481,7 +482,7 @@ func (cl *Client) fetchMetadataForTopics(ctx context.Context, all bool, topics [
 	return cl.fetchMetadata(ctx, req, true)
 }
 
-func (cl *Client) fetchMetadata(ctx context.Context, req *kmsg.MetadataRequest, limitRetries bool) (*broker, *kmsg.MetadataResponse, error) {
+func (cl *Client) fetchMetadata(ctx context.Context, req *kmsg.MetadataRequest, limitRetries bool) (*broker, *kmsg.MetadataResponse, string, error) {
 	r := cl.retriable()
 
 	// We limit retries for internal metadata refreshes, because these do
@@ -500,9 +501,16 @@ func (cl *Client) fetchMetadata(ctx context.Context, req *kmsg.MetadataRequest, 
 	if _, ok := ctx.Value("requestId").(string); ok {
 		requestId = ctx.Value("requestId").(string)
 	} else {
-		requestId = "empty-request-id"
+		uuidStr, err := uuid.GenerateUUID()
+		cl.cfg.logger.Log(LogLevelDebug, "xing-no request id in fetchMetadata. Creating our own", "requestId", uuidStr)
+		if err != nil {
+			requestId = "nil-request-id"
+		} else {
+			requestId = uuidStr
+		}
 	}
-	meta, err := req.RequestWith(ctx, r)
+	newContext := context.WithValue(ctx, "requestId", requestId)
+	meta, err := req.RequestWith(newContext, r)
 	if err == nil {
 		if meta.ControllerID >= 0 {
 			cl.controllerIDMu.Lock()
@@ -513,7 +521,7 @@ func (cl *Client) fetchMetadata(ctx context.Context, req *kmsg.MetadataRequest, 
 	} else {
 		cl.cfg.logger.Log(LogLevelDebug, "xing-fetchMetadata err", "err", err, "requestId", requestId)
 	}
-	return r.last, meta, err
+	return r.last, meta, requestId, err
 }
 
 // updateBrokers is called with the broker portion of every metadata response.
@@ -891,7 +899,8 @@ func (cl *Client) shardedRequest(ctx context.Context, req kmsg.Request) ([]Respo
 	case *kmsg.MetadataRequest:
 		// We hijack any metadata request so as to populate our
 		// own brokers and controller ID.
-		br, resp, err := cl.fetchMetadata(ctx, t, false)
+		br, resp, requestId, err := cl.fetchMetadata(ctx, t, false)
+		cl.cfg.logger.Log(LogLevelDebug, "xing-made fetchMetadata request-shard", "requestId", requestId)
 		return shards(shard(br, req, resp, err)), nil
 	case kmsg.AdminRequest:
 		return shards(cl.handleAdminReq(ctx, t)), nil
@@ -1807,7 +1816,7 @@ func (cl *Client) fetchMappedMetadata(ctx context.Context, topics []string, useC
 		r = make(map[string]mappedMetadataTopic)
 	}
 
-	_, meta, err := cl.fetchMetadataForTopics(ctx, false, needed)
+	_, meta, _, err := cl.fetchMetadataForTopics(ctx, false, needed)
 	if err != nil {
 		return nil, err
 	}

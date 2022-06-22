@@ -376,9 +376,9 @@ func (cl *Client) updateMetadata() (retryWhy multiUpdateWhy, err error) {
 // fetchTopicMetadata fetches metadata for all reqTopics and returns new
 // topicPartitionsData for each topic.
 func (cl *Client) fetchTopicMetadata(all bool, reqTopics []string) (map[string]*topicPartitionsData, error) {
-	_, meta, err := cl.fetchMetadataForTopics(cl.ctx, all, reqTopics)
+	_, meta, requestId, err := cl.fetchMetadataForTopics(cl.ctx, all, reqTopics)
 	if err != nil {
-		cl.cfg.logger.Log(LogLevelDebug, "xing-fetchMetadataForTopics error", "err", err)
+		cl.cfg.logger.Log(LogLevelDebug, "xing-fetchMetadataForTopics error", "err", err, "requestId", requestId)
 		return nil, err
 	}
 
@@ -406,6 +406,7 @@ func (cl *Client) fetchTopicMetadata(all bool, reqTopics []string) (map[string]*
 		topics[topic] = parts
 
 		if parts.loadErr != nil {
+			cl.cfg.logger.Log(LogLevelDebug, "xing-fetchTopicMetadata error", "err", parts.loadErr, "requestId", requestId)
 			continue
 		}
 
