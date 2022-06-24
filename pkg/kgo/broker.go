@@ -210,6 +210,11 @@ func (b *broker) stopForever() {
 	b.cxnFetch.die()
 	b.cxnGroup.die()
 	b.cxnSlow.die()
+	requestId := "empty-string-id"
+	if realId, ok := b.cl.ctx.Value("requestId").(string); ok {
+		requestId = realId
+	}
+	b.cl.cfg.logger.Log(LogLevelDebug, "xing-stopping all brokers", "requestId", requestId)
 }
 
 // do issues a request to the broker, eventually calling the response
@@ -269,11 +274,21 @@ func (b *broker) handleReq(pr promisedReq) {
 	} else {
 		requestId = "empty-request-id"
 	}
+	restartAttempt := 0
+restart:
+	if restartAttempt > 0 {
+		b.cl.cfg.logger.Log(LogLevelDebug, "xing-load-connection-with-retries", "restartAttempt", restartAttempt, "requestId", requestId)
+	}
 	var cxn *brokerCxn
 	{
 		var err error
 		if cxn, err = b.loadConnection(requestId, pr.ctx, req); err != nil {
 			cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-loadConnections-Error", "err", err, "requestId", requestId)
+			if strings.Contains(err.Error(), "write: broken pipe") && restartAttempt < 3 {
+				restartAttempt++
+				b.cl.cfg.logger.Log(LogLevelDebug, "xing-retry-after-loadConnections", "restartAttempt", restartAttempt, "requestId", requestId, "err", err)
+				goto restart
+			}
 			pr.promise(nil, err)
 			return
 		}
@@ -332,7 +347,7 @@ func (b *broker) handleReq(pr promisedReq) {
 		// reply with a <1s lifetime, but if we end up here, then we
 		// kill the connection ourselves and retry on a new connection.
 		if reauthentications > 15 {
-			cxn.cl.cfg.logger.Log(LogLevelError, "the broker has repeatedly given us short sasl lifetimes, we are forcefully killing our own connection to retry on a new connection ", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId)
+			cxn.cl.cfg.logger.Log(LogLevelError, "the broker has repeatedly given us short sasl lifetimes, we are forcefully killing our own connection to retry on a new connection ", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId, "authRequestId", cxn.AuthRequestId)
 			pr.promise(nil, errSaslReauthLoop)
 			cxn.die()
 			return
@@ -344,6 +359,12 @@ func (b *broker) handleReq(pr promisedReq) {
 		// For KIP-368.
 		cxn.cl.cfg.logger.Log(LogLevelDebug, "sasl expiry limit reached, reauthenticating", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId)
 		if err := cxn.sasl(requestId); err != nil {
+			cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-error during sasl reauthenticating and killing connection", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId, "err", err, "broker", cxn.addr, "authRequestId", cxn.AuthRequestId)
+			if strings.Contains(err.Error(), "write: broken pipe") && restartAttempt < 3 {
+				restartAttempt++
+				b.cl.cfg.logger.Log(LogLevelDebug, "xing-retry-after-sasl", "restartAttempt", restartAttempt, "requestId", requestId, "err", err)
+				goto restart
+			}
 			pr.promise(nil, err)
 			cxn.die()
 			return
@@ -772,6 +793,7 @@ start:
 		rt, _ := cxn.cl.connTimeouter.timeouts(req)
 		rawResp, err := cxn.readResponse(nil, req.Key(), req.GetVersion(), corrID, req.IsFlexible(), rt, bytesWritten, writeWait, timeToWrite, readEnqueue)
 		if err != nil {
+			cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-sasl-SASLHandshakeRequest-readResponseErr", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId, "err", err)
 			return err
 		}
 		resp := req.ResponseKind().(*kmsg.SASLHandshakeResponse)
@@ -792,7 +814,7 @@ start:
 					}
 				}
 			}
-			cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-sasl-SASLHandshakeResponseeError", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId, "err", writeErr)
+			cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-sasl-SASLHandshakeResponseeError", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId, "err", err)
 			return err
 		}
 		authenticate = req.Version == 1
@@ -842,10 +864,12 @@ func (cxn *brokerCxn) doSasl(authenticate bool, requestId string) error {
 			cxn.cl.bufPool.put(buf)
 
 			if err != nil {
+				cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-doSasl-writeConn error", "broker", logID(cxn.b.meta.NodeID), "step", step, "requestId", requestId, "broker", logID(cxn.b.meta.NodeID), "err", err)
 				return err
 			}
 			if !done {
 				if _, challenge, _, _, err = cxn.readConn(context.Background(), rt, time.Now()); err != nil {
+					cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-doSasl-readConn error", "broker", logID(cxn.b.meta.NodeID), "step", step, "requestId", requestId, "broker", logID(cxn.b.meta.NodeID), "err", err)
 					return err
 				}
 			}
@@ -900,7 +924,7 @@ func (cxn *brokerCxn) doSasl(authenticate bool, requestId string) error {
 
 		if !done {
 			if done, clientWrite, err = session.Challenge(challenge); err != nil {
-				cxn.cl.cfg.logger.Log(LogLevelDebug, "sasl has errors ", "error", err, "requestId", requestId, "broker", logID(cxn.b.meta.NodeID))
+				cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-sasl has errors", "error", err, "requestId", requestId, "broker", logID(cxn.b.meta.NodeID))
 				return err
 			}
 		}
@@ -920,8 +944,8 @@ func (cxn *brokerCxn) doSasl(authenticate bool, requestId string) error {
 		// <100ms, we sleep for 100ms just to ensure we do not
 		// spin-loop reauthenticating *too* much.
 		latency := int64(float64(time.Since(prereq).Milliseconds()) * 1.1)
-		if latency < 10000 {
-			latency = 10000
+		if latency < 2500 {
+			latency = 2500
 		}
 
 		useLifetime := lifetimeMillis - latency
@@ -978,6 +1002,7 @@ func (cxn *brokerCxn) writeRequest(ctx context.Context, enqueuedForWritingAt tim
 			if writeErr != nil {
 				after.Stop()
 				writeWait = time.Since(enqueuedForWritingAt)
+				cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-write error during throttling", "err", writeErr, "writeWait", writeWait, "requestId", requestId)
 				return
 			}
 		}
@@ -989,8 +1014,16 @@ func (cxn *brokerCxn) writeRequest(ctx context.Context, enqueuedForWritingAt tim
 		cxn.corrID,
 	)
 
+	if writeErr != nil {
+		cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-write error after throttling", "requestId", requestId)
+	}
+
 	_, wt := cxn.cl.connTimeouter.timeouts(req)
 	bytesWritten, writeWait, timeToWrite, readEnqueue, writeErr = cxn.writeConn(ctx, buf, wt, enqueuedForWritingAt)
+
+	if writeErr != nil {
+		cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-write error after write conn", "timeout", wt, "requestId", requestId)
+	}
 
 	cxn.cl.bufPool.put(buf)
 
@@ -1000,7 +1033,7 @@ func (cxn *brokerCxn) writeRequest(ctx context.Context, enqueuedForWritingAt tim
 		}
 	})
 	if logger := cxn.cl.cfg.logger; logger.Level() >= LogLevelDebug {
-		logger.Log(LogLevelDebug, fmt.Sprintf("wrote %s v%d", kmsg.NameForKey(req.Key()), req.GetVersion()), "broker", logID(cxn.b.meta.NodeID), "bytes_written", bytesWritten, "write_wait", writeWait, "time_to_write", timeToWrite, "err", writeErr)
+		logger.Log(LogLevelDebug, fmt.Sprintf("wrote %s v%d", kmsg.NameForKey(req.Key()), req.GetVersion()), "broker", logID(cxn.b.meta.NodeID), "bytes_written", bytesWritten, "write_wait", writeWait, "time_to_write", timeToWrite, "err", writeErr, "requestId", requestId)
 	}
 
 	if writeErr != nil {
@@ -1425,11 +1458,12 @@ func (cxn *brokerCxn) handleResp(requestId string, pr promisedResp) {
 	if err != nil {
 		if !errors.Is(err, ErrClientClosed) && !errors.Is(err, context.Canceled) {
 			if cxn.successes > 0 || len(cxn.b.cl.cfg.sasls) > 0 {
-				cxn.b.cl.cfg.logger.Log(LogLevelDebug, "read from broker errored, killing connection", "addr", cxn.b.addr, "broker", logID(cxn.b.meta.NodeID), "successful_reads", cxn.successes, "err", err)
+				cxn.b.cl.cfg.logger.Log(LogLevelDebug, "read from broker errored, killing connection", "addr", cxn.b.addr, "broker", logID(cxn.b.meta.NodeID), "successful_reads", cxn.successes, "err", err, "requestId", requestId)
 			} else {
-				cxn.b.cl.cfg.logger.Log(LogLevelWarn, "read from broker errored, killing connection after 0 successful responses (is sasl missing?)", "addr", cxn.b.addr, "broker", logID(cxn.b.meta.NodeID), "err", err)
+				cxn.b.cl.cfg.logger.Log(LogLevelWarn, "read from broker errored, killing connection after 0 successful responses (is sasl missing?)", "addr", cxn.b.addr, "broker", logID(cxn.b.meta.NodeID), "err", err, "requestId", requestId)
 			}
 		}
+		cxn.b.cl.cfg.logger.Log(LogLevelWarn, "xing-read from broker errored, killing connection ", "addr", cxn.b.addr, "broker", logID(cxn.b.meta.NodeID), "successful_reads", cxn.successes, "err", err, "requestId", requestId)
 		pr.promise(nil, err)
 		cxn.die()
 		return

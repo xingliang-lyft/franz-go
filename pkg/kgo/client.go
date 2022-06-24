@@ -479,7 +479,9 @@ func (cl *Client) fetchMetadataForTopics(ctx context.Context, all bool, topics [
 			req.Topics = append(req.Topics, reqTopic)
 		}
 	}
-	return cl.fetchMetadata(ctx, req, true)
+	broker, meta, requestId, err := cl.fetchMetadata(ctx, req, true)
+	cl.cfg.logger.Log(LogLevelDebug, "xing-fetchMetadataForTopics completed", "requestId", requestId)
+	return broker, meta, requestId, err
 }
 
 func (cl *Client) fetchMetadata(ctx context.Context, req *kmsg.MetadataRequest, limitRetries bool) (*broker, *kmsg.MetadataResponse, string, error) {
@@ -682,11 +684,16 @@ func (cl *Client) Close() {
 // configuration, and it will rewrite the timeout millis if the acks is 0. It
 // is strongly recommended to not issue raw kmsg.ProduceRequest's.
 func (cl *Client) Request(ctx context.Context, req kmsg.Request) (kmsg.Response, error) {
-	requestId, uuidErr := uuid.GenerateUUID()
-	if uuidErr != nil {
-		requestId = "empty-request-id"
+	var newCtx context.Context
+	if _, ok := ctx.Value("requestId").(string); !ok {
+		requestId, uuidErr := uuid.GenerateUUID()
+		if uuidErr != nil {
+			requestId = "empty-request-id"
+		}
+		newCtx = context.WithValue(ctx, "requestId", requestId)
+	} else {
+		newCtx = ctx
 	}
-	newCtx := context.WithValue(ctx, "requestId", requestId)
 	resps, merge := cl.shardedRequest(newCtx, req)
 	// If there is no merge function, only one request was issued directly
 	// to a broker. Return the resp and err directly.
