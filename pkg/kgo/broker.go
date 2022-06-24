@@ -283,7 +283,7 @@ restart:
 	{
 		var err error
 		if cxn, err = b.loadConnection(requestId, pr.ctx, req); err != nil {
-			cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-loadConnections-Error", "err", err, "requestId", requestId)
+			b.cl.cfg.logger.Log(LogLevelDebug, "xing-loadConnections-Error", "err", err, "requestId", requestId)
 			if strings.Contains(err.Error(), "write: broken pipe") && restartAttempt < 3 {
 				restartAttempt++
 				b.cl.cfg.logger.Log(LogLevelDebug, "xing-retry-after-loadConnections", "restartAttempt", restartAttempt, "requestId", requestId, "err", err)
@@ -293,7 +293,7 @@ restart:
 			return
 		}
 	}
-	cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-loadConnections-success", "requestId", requestId, "broker", logID(cxn.b.meta.NodeID))
+	b.cl.cfg.logger.Log(LogLevelDebug, "xing-loadConnections-success", "requestId", requestId, "broker", logID(cxn.b.meta.NodeID))
 	v := b.loadVersions()
 
 	if int(req.Key()) > v.len() || b.cl.cfg.maxVersions != nil && !b.cl.cfg.maxVersions.HasKey(req.Key()) {
@@ -339,7 +339,7 @@ restart:
 	req.SetVersion(version) // always go for highest version
 
 	now := time.Now()
-	cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-expiry time for cxn", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId, "expiry", cxn.expiry.UTC().String(), "now at", now, "is after", now.After(cxn.expiry), "authRequestId", cxn.AuthRequestId)
+	b.cl.cfg.logger.Log(LogLevelDebug, "xing-expiry time for cxn", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId, "expiry", cxn.expiry.UTC().String(), "now at", now, "is after", now.After(cxn.expiry), "authRequestId", cxn.AuthRequestId)
 	for reauthentications := 1; time.Now().After(cxn.expiry); reauthentications++ {
 		// We allow 15 reauths, which is a lot. If a new lifetime is
 		// <2.5s, we sleep 100ms and try again. Retrying 15x puts us at
@@ -347,7 +347,7 @@ restart:
 		// reply with a <1s lifetime, but if we end up here, then we
 		// kill the connection ourselves and retry on a new connection.
 		if reauthentications > 15 {
-			cxn.cl.cfg.logger.Log(LogLevelError, "the broker has repeatedly given us short sasl lifetimes, we are forcefully killing our own connection to retry on a new connection ", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId, "authRequestId", cxn.AuthRequestId)
+			b.cl.cfg.logger.Log(LogLevelError, "the broker has repeatedly given us short sasl lifetimes, we are forcefully killing our own connection to retry on a new connection ", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId, "authRequestId", cxn.AuthRequestId)
 			pr.promise(nil, errSaslReauthLoop)
 			cxn.die()
 			return
@@ -357,9 +357,9 @@ restart:
 		// can only have an expiry if we went the authenticate
 		// flow, so we know we are authenticating again.
 		// For KIP-368.
-		cxn.cl.cfg.logger.Log(LogLevelDebug, "sasl expiry limit reached, reauthenticating", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId)
+		b.cl.cfg.logger.Log(LogLevelDebug, "sasl expiry limit reached, reauthenticating", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId)
 		if err := cxn.sasl(requestId); err != nil {
-			cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-error during sasl reauthenticating and killing connection", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId, "err", err, "broker", cxn.addr, "authRequestId", cxn.AuthRequestId)
+			b.cl.cfg.logger.Log(LogLevelDebug, "xing-error during sasl reauthenticating and killing connection", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId, "err", err, "broker", cxn.addr, "authRequestId", cxn.AuthRequestId)
 			if strings.Contains(err.Error(), "write: broken pipe") && restartAttempt < 3 {
 				restartAttempt++
 				b.cl.cfg.logger.Log(LogLevelDebug, "xing-retry-after-sasl", "restartAttempt", restartAttempt, "requestId", requestId, "err", err)
@@ -379,7 +379,7 @@ restart:
 	// loop. We could be more precise with error tracking, though.
 	select {
 	case <-pr.ctx.Done():
-		cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-context-canceled-Error", "err", pr.ctx.Err(), "requestId", requestId)
+		b.cl.cfg.logger.Log(LogLevelDebug, "xing-context-canceled-Error", "err", pr.ctx.Err(), "requestId", requestId)
 		pr.promise(nil, pr.ctx.Err())
 		return
 	default:
@@ -418,7 +418,7 @@ restart:
 	corrID, bytesWritten, writeWait, timeToWrite, readEnqueue, writeErr := cxn.writeRequest(pr.ctx, pr.enqueue, req, requestId)
 
 	if writeErr != nil {
-		cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-writeRequest-Error", "err", pr.ctx.Err(), "requestId", requestId)
+		b.cl.cfg.logger.Log(LogLevelDebug, "xing-writeRequest-Error", "err", pr.ctx.Err(), "requestId", requestId)
 		pr.promise(nil, writeErr)
 		cxn.die()
 		cxn.hookWriteE2E(req.Key(), bytesWritten, writeWait, timeToWrite, writeErr)
