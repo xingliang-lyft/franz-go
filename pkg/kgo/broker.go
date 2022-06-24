@@ -287,6 +287,7 @@ restart:
 			if strings.Contains(err.Error(), "write: broken pipe") && restartAttempt < 3 {
 				restartAttempt++
 				b.cl.cfg.logger.Log(LogLevelDebug, "xing-retry-after-loadConnections", "restartAttempt", restartAttempt, "requestId", requestId, "err", err)
+				time.Sleep(100 * time.Millisecond)
 				goto restart
 			}
 			pr.promise(nil, err)
@@ -362,7 +363,9 @@ restart:
 			b.cl.cfg.logger.Log(LogLevelDebug, "xing-error during sasl reauthenticating and killing connection", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId, "err", err, "broker", cxn.addr, "authRequestId", cxn.AuthRequestId)
 			if strings.Contains(err.Error(), "write: broken pipe") && restartAttempt < 3 {
 				restartAttempt++
+				cxn.die() // connection is either closed by us at somewhere or by the server. In both cases, we need to close the current one and create a new conneciton.
 				b.cl.cfg.logger.Log(LogLevelDebug, "xing-retry-after-sasl", "restartAttempt", restartAttempt, "requestId", requestId, "err", err)
+				time.Sleep(100 * time.Millisecond)
 				goto restart
 			}
 			pr.promise(nil, err)
@@ -445,6 +448,10 @@ restart:
 		timeToWrite,
 		readEnqueue,
 	})
+
+	if restartAttempt > 0 {
+		b.cl.cfg.logger.Log(LogLevelDebug, "xing-retry-succeeded", "requestId", requestId)
+	}
 }
 
 func (cxn *brokerCxn) hookWriteE2E(key int16, bytesWritten int, writeWait, timeToWrite time.Duration, writeErr error) {
