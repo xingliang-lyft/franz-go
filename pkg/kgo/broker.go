@@ -833,7 +833,8 @@ start:
 }
 
 func (cxn *brokerCxn) doSasl(authenticate bool, requestId string) error {
-	session, clientWrite, err := cxn.mechanism.Authenticate(cxn.cl.ctx, cxn.addr)
+	authCtx := context.WithValue(cxn.cl.ctx, "requestId", requestId)
+	session, clientWrite, err := cxn.mechanism.Authenticate(authCtx, cxn.addr)
 	if err != nil {
 		cxn.cl.cfg.logger.Log(LogLevelDebug, "xing-doSasl has early errors", "err", err, "requestId", requestId, "broker", logID(cxn.b.meta.NodeID))
 		return err
