@@ -275,7 +275,7 @@ func (b *broker) handleReq(pr promisedReq) {
 		requestId = "empty-request-id"
 	}
 	restartAttempt := 0
-restart:
+	//restart:
 	if restartAttempt > 0 {
 		b.cl.cfg.logger.Log(LogLevelDebug, "xing-load-connection-with-retries", "restartAttempt", restartAttempt, "requestId", requestId)
 	}
