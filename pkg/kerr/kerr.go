@@ -12,7 +12,7 @@ package kerr
 import (
 	"errors"
 	"fmt"
-	"strings"
+	//"strings"
 )
 
 // Error is a Kafka error.
@@ -70,7 +70,8 @@ func TypedErrorForCode(code int16) *Error {
 // IsRetriable returns whether a Kafka error is considered retriable.
 func IsRetriable(err error) bool {
 	var kerr *Error
-	return errors.As(err, &kerr) && kerr.Retriable || err != nil && strings.Contains(err.Error(), "TOPIC_AUTHORIZATION_FAILED")
+	return errors.As(err, &kerr) && kerr.Retriable
+	//return errors.As(err, &kerr) && kerr.Retriable || err != nil && strings.Contains(err.Error(), "TOPIC_AUTHORIZATION_FAILED")
 }
 
 var (

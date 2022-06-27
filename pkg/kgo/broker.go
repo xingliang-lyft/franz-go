@@ -284,12 +284,12 @@ restart:
 		var err error
 		if cxn, err = b.loadConnection(requestId, pr.ctx, req); err != nil {
 			b.cl.cfg.logger.Log(LogLevelDebug, "xing-loadConnections-Error", "err", err, "requestId", requestId)
-			if strings.Contains(err.Error(), "write: broken pipe") && restartAttempt < 3 {
-				restartAttempt++
-				b.cl.cfg.logger.Log(LogLevelDebug, "xing-retry-after-loadConnections", "restartAttempt", restartAttempt, "requestId", requestId, "err", err)
-				time.Sleep(100 * time.Millisecond)
-				goto restart
-			}
+			//if strings.Contains(err.Error(), "write: broken pipe") && restartAttempt < 3 {
+			//	restartAttempt++
+			//	b.cl.cfg.logger.Log(LogLevelDebug, "xing-retry-after-loadConnections", "restartAttempt", restartAttempt, "requestId", requestId, "err", err)
+			//	time.Sleep(100 * time.Millisecond)
+			//	goto restart
+			//}
 			pr.promise(nil, err)
 			return
 		}
@@ -341,14 +341,14 @@ restart:
 
 	now := time.Now()
 	b.cl.cfg.logger.Log(LogLevelDebug, "xing-expiry time for cxn", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId, "expiry", cxn.expiry.UTC().String(), "now at", now, "is after", now.After(cxn.expiry), "authRequestId", cxn.AuthRequestId)
-	for reauthentications := 1; time.Now().After(cxn.expiry); reauthentications++ {
+	for reauthentications := 1; !cxn.expiry.IsZero() && time.Now().After(cxn.expiry); reauthentications++ {
 		// We allow 15 reauths, which is a lot. If a new lifetime is
 		// <2.5s, we sleep 100ms and try again. Retrying 15x puts us at
 		// <1s compared to the original lifetime. A broker should not
 		// reply with a <1s lifetime, but if we end up here, then we
 		// kill the connection ourselves and retry on a new connection.
 		if reauthentications > 15 {
-			b.cl.cfg.logger.Log(LogLevelError, "the broker has repeatedly given us short sasl lifetimes, we are forcefully killing our own connection to retry on a new connection ", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId, "authRequestId", cxn.AuthRequestId)
+			cxn.cl.cfg.logger.Log(LogLevelError, "the broker has repeatedly given us short sasl lifetimes, we are forcefully killing our own connection to retry on a new connection ", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId, "authRequestId", cxn.AuthRequestId)
 			pr.promise(nil, errSaslReauthLoop)
 			cxn.die()
 			return
@@ -361,15 +361,14 @@ restart:
 		b.cl.cfg.logger.Log(LogLevelDebug, "sasl expiry limit reached, reauthenticating", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId)
 		if err := cxn.sasl(requestId); err != nil {
 			b.cl.cfg.logger.Log(LogLevelDebug, "xing-error during sasl reauthenticating and killing connection", "broker", logID(cxn.b.meta.NodeID), "requestId", requestId, "err", err, "broker", cxn.addr, "authRequestId", cxn.AuthRequestId)
-			if strings.Contains(err.Error(), "write: broken pipe") && restartAttempt < 3 {
-				restartAttempt++
-				cxn.die() // connection is either closed by us at somewhere or by the server. In both cases, we need to close the current one and create a new conneciton.
-				b.cl.cfg.logger.Log(LogLevelDebug, "xing-retry-after-sasl", "restartAttempt", restartAttempt, "requestId", requestId, "err", err)
-				time.Sleep(100 * time.Millisecond)
-				goto restart
-			}
+			cxn.die() // connection is either closed by us at somewhere or by the server. In both cases, we need to close the current one and create a new conneciton.
+			//if strings.Contains(err.Error(), "write: broken pipe") && restartAttempt < 3 {
+			//	restartAttempt++
+			//	b.cl.cfg.logger.Log(LogLevelDebug, "xing-retry-after-sasl", "restartAttempt", restartAttempt, "requestId", requestId, "err", err)
+			//	time.Sleep(100 * time.Millisecond)
+			//	goto restart
+			//}
 			pr.promise(nil, err)
-			cxn.die()
 			return
 		}
 	}
